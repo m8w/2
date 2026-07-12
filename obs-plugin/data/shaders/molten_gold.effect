@@ -1,0 +1,149 @@
+// Domain-warped fractal noise field rendered in a molten gold/bronze
+// palette with specular sparkle, ported from visualizer/shaders.js
+// (FS_GOLD). uMouse/vignette-under-parallax is dropped since this runs
+// unattended in a scene; band energies come from audio-bands.c.
+
+uniform float4x4 ViewProj;
+uniform float2 uResolution;
+uniform float uTime;
+uniform float uSeed;
+uniform float uBass;
+uniform float uMid;
+uniform float uTreble;
+uniform float uAmp;
+uniform float uBeat;
+uniform float uReactivity;
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData vert_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = vert_in.uv;
+	return vert_out;
+}
+
+float2 hash2(float2 p, float seed)
+{
+	p = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
+	return -1.0 + 2.0 * frac(sin(p + seed * 17.0) * 43758.5453123);
+}
+
+float vnoise(float2 p, float seed)
+{
+	float2 i = floor(p);
+	float2 f = frac(p);
+	float2 u = f * f * (3.0 - 2.0 * f);
+	float a = dot(hash2(i + float2(0.0, 0.0), seed), f - float2(0.0, 0.0));
+	float b = dot(hash2(i + float2(1.0, 0.0), seed), f - float2(1.0, 0.0));
+	float c = dot(hash2(i + float2(0.0, 1.0), seed), f - float2(0.0, 1.0));
+	float d = dot(hash2(i + float2(1.0, 1.0), seed), f - float2(1.0, 1.0));
+	return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+float fbm(float2 p, float seed)
+{
+	float sum = 0.0;
+	float amp = 0.5;
+	for (int i = 0; i < 6; i++) {
+		sum += amp * vnoise(p, seed);
+		float rx = p.x * 0.8 + p.y * 0.6;
+		float ry = -p.x * 0.6 + p.y * 0.8;
+		p = float2(rx, ry) * 2.02;
+		amp *= 0.52;
+	}
+	return sum;
+}
+
+float warpedField(float2 p, float t, float seed)
+{
+	float2 q = float2(fbm(p + float2(0.0, 0.0) + 0.05 * t, seed),
+	                   fbm(p + float2(5.2, 1.3) - 0.04 * t, seed));
+	float2 r = float2(fbm(p + 4.0 * q + float2(1.7, 9.2) + 0.09 * t, seed),
+	                   fbm(p + 4.0 * q + float2(8.3, 2.8) + 0.07 * t, seed));
+	return fbm(p + 4.0 * r, seed);
+}
+
+float3 goldPalette(float t, float hueShift)
+{
+	t = clamp((t - 0.58) * 1.9 + 0.42, 0.0, 1.0);
+	float3 c0 = float3(0.05, 0.025, 0.01);
+	float3 c1 = float3(0.42, 0.17, 0.02);
+	float3 c2 = float3(0.92, 0.50, 0.06);
+	float3 c3 = float3(1.00, 0.84, 0.28);
+	float3 c4 = float3(1.00, 0.98, 0.86);
+	float3 col = lerp(c0, c1, smoothstep(0.0, 0.28, t));
+	col = lerp(col, c2, smoothstep(0.24, 0.50, t));
+	col = lerp(col, c3, smoothstep(0.46, 0.72, t));
+	col = lerp(col, c4, smoothstep(0.70, 0.96, t));
+
+	float s = sin(hueShift), c = cos(hueShift);
+	float g2 = c * col.g - s * col.b;
+	float b2 = s * col.g + c * col.b;
+	float3 rotated = float3(col.r, g2, b2);
+	return clamp(col + (rotated - col) * 0.35, 0.0, 1.5);
+}
+
+float4 PSDefault(VertData vert_in) : TARGET
+{
+	float2 uv = (vert_in.uv - 0.5) * float2(uResolution.x / uResolution.y, 1.0);
+	float2 drift = float2(uTime * 0.015, -uTime * 0.011);
+	float2 p = uv * 2.6 + drift;
+
+	float warpSpeed = 0.4 + uBass * 1.8 * uReactivity;
+	float t = uTime * warpSpeed;
+	float f = warpedField(p, t, uSeed);
+	float field = f * 0.5 + 0.5;
+
+	float3 col = goldPalette(field, uMid * 2.2 * uReactivity);
+
+	float e = 0.0025;
+	float fx = warpedField(p + float2(e, 0.0), t, uSeed);
+	float fy = warpedField(p + float2(0.0, e), t, uSeed);
+	float3 normal = normalize(float3(-(fx - f), -(fy - f), e * 6.0));
+	float3 lightDir = normalize(float3(0.5, 0.65, 0.7));
+	float diff = clamp(dot(normal, lightDir), 0.0, 1.0);
+	col *= 0.55 + 0.65 * diff;
+
+	float3 viewDir = float3(0.0, 0.0, 1.0);
+	float3 halfV = normalize(lightDir + viewDir);
+	float spec = pow(clamp(dot(normal, halfV), 0.0, 1.0), 24.0);
+	float sparkleField = fbm(p * 14.0 + 13.7 - t * 0.6, uSeed);
+	float sparkleThresh = lerp(0.55, 0.35, clamp(uTreble * uReactivity, 0.0, 1.0));
+	float sparkleMask = smoothstep(sparkleThresh, 0.88, sparkleField);
+	float twinkle = 0.5 + 0.5 * sin(uTime * 5.0 + sparkleField * 60.0);
+	float3 specCol = float3(1.0, 0.97, 0.85) * spec * (5.5 + uTreble * 6.0 * uReactivity);
+	specCol += float3(1.0, 0.95, 0.72) * sparkleMask * twinkle * (2.6 + uTreble * 3.0 * uReactivity);
+	col += specCol;
+
+	float glow = smoothstep(0.6, 1.0, field);
+	col += float3(1.0, 0.6, 0.12) * glow * (0.4 + uAmp * 0.6 * uReactivity);
+
+	col += float3(1.0, 0.7, 0.3) * uBeat * 0.18 * uReactivity;
+
+	float vig = smoothstep(1.15, 0.2, length(uv));
+	col *= lerp(0.65, 1.0, vig);
+
+	float grainSeed = dot(vert_in.uv * uResolution, float2(12.9898, 78.233)) + uTime * 60.0;
+	float grain = (frac(sin(grainSeed) * 43758.5453) - 0.5) * 0.03;
+	col += grain;
+
+	col *= 1.15;
+	col = col / (1.0 + col);
+	col = pow(col, float3(0.78, 0.78, 0.78));
+
+	return float4(col, 1.0);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDefault(vert_in);
+	}
+}

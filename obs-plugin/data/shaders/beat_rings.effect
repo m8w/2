@@ -1,0 +1,92 @@
+// Beat-reactive expanding rings, ported from visualizer/shaders.js
+// (FS_RINGS). Meant to be layered over another source using OBS's
+// scene-item "Additive" blending mode.
+
+uniform float4x4 ViewProj;
+uniform float2 uResolution;
+uniform float uTime;
+uniform float uSeed;
+uniform float uBass;
+uniform float uMid;
+uniform float uTreble;
+uniform float uAmp;
+uniform float uBeat;
+uniform float uReactivity;
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData vert_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = vert_in.uv;
+	return vert_out;
+}
+
+float2 hash2(float2 p, float seed)
+{
+	p = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
+	return -1.0 + 2.0 * frac(sin(p + seed * 17.0) * 43758.5453123);
+}
+
+float vnoise(float2 p, float seed)
+{
+	float2 i = floor(p);
+	float2 f = frac(p);
+	float2 u = f * f * (3.0 - 2.0 * f);
+	float a = dot(hash2(i + float2(0.0, 0.0), seed), f - float2(0.0, 0.0));
+	float b = dot(hash2(i + float2(1.0, 0.0), seed), f - float2(1.0, 0.0));
+	float c = dot(hash2(i + float2(0.0, 1.0), seed), f - float2(0.0, 1.0));
+	float d = dot(hash2(i + float2(1.0, 1.0), seed), f - float2(1.0, 1.0));
+	return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+float fbm(float2 p, float seed)
+{
+	float sum = 0.0;
+	float amp = 0.5;
+	for (int i = 0; i < 6; i++) {
+		sum += amp * vnoise(p, seed);
+		float rx = p.x * 0.8 + p.y * 0.6;
+		float ry = -p.x * 0.6 + p.y * 0.8;
+		p = float2(rx, ry) * 2.02;
+		amp *= 0.52;
+	}
+	return sum;
+}
+
+float4 PSDefault(VertData vert_in) : TARGET
+{
+	float2 uv = (vert_in.uv - 0.5) * float2(uResolution.x / uResolution.y, 1.0);
+	float r = length(uv);
+	float ang = atan2(uv.y, uv.x);
+
+	float wobble = fbm(float2(ang * 2.0, uTime * 0.2), uSeed) * 0.06 * (0.5 + uMid);
+	float rings = sin((r + wobble) * 32.0 - uTime * (2.0 + uTreble * 6.0 * uReactivity));
+	float ringMask = smoothstep(0.94, 1.0, rings);
+
+	float pulse = uBeat * uReactivity;
+	float pulseRing = smoothstep(0.02, 0.0, abs(r - pulse * 0.9 - 0.05));
+
+	float3 iceCol = lerp(float3(0.55, 0.85, 1.0), float3(1.0, 1.0, 0.95), uTreble);
+	float3 col = iceCol * ringMask * (0.35 + 0.5 * uAmp * uReactivity);
+	col += float3(0.8, 0.95, 1.0) * pulseRing * 1.4;
+
+	float vig = smoothstep(1.1, 0.1, r);
+	col *= vig;
+
+	float alpha = saturate(ringMask * 0.8 + pulseRing);
+	return float4(col, alpha);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(vert_in);
+		pixel_shader  = PSDefault(vert_in);
+	}
+}

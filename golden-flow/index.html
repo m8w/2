@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Molten Gold — generative fractal flow</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: crosshair; }
+  #hint {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    color: rgba(255, 224, 150, 0.55);
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    letter-spacing: 0.08em; text-transform: uppercase; text-align: center;
+    pointer-events: none; transition: opacity 1.2s ease; opacity: 1;
+    text-shadow: 0 0 12px rgba(0,0,0,0.8);
+  }
+  #hint.faded { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hint">move · click to reseed · [ ] to warp speed</div>
+
+<script id="vs" type="x-shader/x-vertex">#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script id="fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+
+uniform vec2  uResolution;
+uniform float uTime;
+uniform vec2  uMouse;      // normalized -1..1, smoothed
+uniform float uSeed;
+uniform float uWarpSpeed;
+
+out vec4 fragColor;
+
+// ---------- hashing / noise ----------
+vec2 hash2(vec2 p) {
+  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+  return -1.0 + 2.0 * fract(sin(p + uSeed * 17.0) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(dot(hash2(i + vec2(0.0,0.0)), f - vec2(0.0,0.0)),
+        dot(hash2(i + vec2(1.0,0.0)), f - vec2(1.0,0.0)), u.x),
+    mix(dot(hash2(i + vec2(0.0,1.0)), f - vec2(0.0,1.0)),
+        dot(hash2(i + vec2(1.0,1.0)), f - vec2(1.0,1.0)), u.x),
+    u.y
+  );
+}
+
+float fbm(vec2 p) {
+  float sum = 0.0;
+  float amp = 0.5;
+  mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+  for (int i = 0; i < 6; i++) {
+    sum += amp * noise(p);
+    p = rot * p * 2.02;
+    amp *= 0.52;
+  }
+  return sum;
+}
+
+// Domain-warped fractal field (Inigo Quilez pattern), driven by time so the
+// "viscous" flow keeps evolving rather than settling into a static image.
+float warpedField(vec2 p, float t, out vec2 gradHint) {
+  vec2 q = vec2(
+    fbm(p + vec2(0.0, 0.0) + 0.05 * t),
+    fbm(p + vec2(5.2, 1.3) - 0.04 * t)
+  );
+  vec2 r = vec2(
+    fbm(p + 4.0 * q + vec2(1.7, 9.2) + 0.09 * t),
+    fbm(p + 4.0 * q + vec2(8.3, 2.8) + 0.07 * t)
+  );
+  gradHint = r;
+  return fbm(p + 4.0 * r);
+}
+
+// molten gold / bronze palette, biased warm — deep bronze -> amber -> gold -> near-white hot spots
+vec3 goldPalette(float t) {
+  // punch up contrast so the field spends less time parked in the midtone khaki band;
+  // bias the midpoint high so most of the surface reads as dark bronze with only
+  // the ridge peaks flaring into bright gold
+  t = clamp((t - 0.58) * 1.9 + 0.42, 0.0, 1.0);
+  vec3 c0 = vec3(0.05, 0.025, 0.01);  // near-black bronze shadow
+  vec3 c1 = vec3(0.42, 0.17, 0.02);   // deep bronze
+  vec3 c2 = vec3(0.92, 0.50, 0.06);   // amber
+  vec3 c3 = vec3(1.00, 0.84, 0.28);   // gold
+  vec3 c4 = vec3(1.00, 0.98, 0.86);   // hot highlight
+  vec3 col = mix(c0, c1, smoothstep(0.0, 0.28, t));
+  col = mix(col, c2, smoothstep(0.24, 0.50, t));
+  col = mix(col, c3, smoothstep(0.46, 0.72, t));
+  col = mix(col, c4, smoothstep(0.70, 0.96, t));
+  return col;
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+
+  // slow drift + mouse parallax
+  vec2 drift = vec2(uTime * 0.015, -uTime * 0.011);
+  vec2 p = uv * 2.6 + drift + uMouse * 0.35;
+
+  float t = uTime * uWarpSpeed;
+  vec2 gradHint;
+  float f = warpedField(p, t, gradHint);        // roughly [-1, 1]
+  float field = f * 0.5 + 0.5;                  // -> [0,1]
+
+  vec3 col = goldPalette(field);
+
+  // --- viscous undulation shading: fake normal from field gradient ---
+  float e = 0.0025;
+  vec2 gh;
+  float fx = warpedField(p + vec2(e, 0.0), t, gh);
+  float fy = warpedField(p + vec2(0.0, e), t, gh);
+  vec3 normal = normalize(vec3(-(fx - f), -(fy - f), e * 6.0));
+  vec3 lightDir = normalize(vec3(0.5, 0.65, 0.7));
+  float diff = clamp(dot(normal, lightDir), 0.0, 1.0);
+  col *= 0.55 + 0.65 * diff;
+
+  // --- scattered specular highlights (glinting flecks) ---
+  vec3 viewDir = vec3(0.0, 0.0, 1.0);
+  vec3 halfV = normalize(lightDir + viewDir);
+  float spec = pow(clamp(dot(normal, halfV), 0.0, 1.0), 24.0);
+  float sparkleField = fbm(p * 14.0 + 13.7 - t * 0.6);
+  float sparkleMask = smoothstep(0.45, 0.88, sparkleField);
+  float twinkle = 0.5 + 0.5 * sin(uTime * 5.0 + sparkleField * 60.0);
+  vec3 specCol = vec3(1.0, 0.97, 0.85) * spec * 5.5;
+  specCol += vec3(1.0, 0.95, 0.72) * sparkleMask * twinkle * 2.6;
+  col += specCol;
+
+  // rim glow at high field values, warm bloom
+  float glow = smoothstep(0.6, 1.0, field);
+  col += vec3(1.0, 0.6, 0.12) * glow * 0.4;
+
+  // subtle animated glitch streaks for the "deep dream / signal noise" edge
+  float streak = fbm(vec2(p.y * 3.0, t * 0.3));
+  float glitchLine = step(0.965, fract(streak * 4.0 + t * 0.05));
+  vec2 shift = vec2(glitchLine * 0.006 * sin(t * 9.0 + p.y * 40.0), 0.0);
+  vec3 chroma;
+  chroma.r = goldPalette(field + 0.02 + shift.x).r;
+  chroma.g = col.g;
+  chroma.b = goldPalette(field - 0.02 - shift.x).b * 0.9;
+  col = mix(col, chroma, glitchLine * 0.6);
+
+  // vignette
+  float vig = smoothstep(1.15, 0.2, length(uv));
+  col *= mix(0.65, 1.0, vig);
+
+  // fine film grain
+  float grain = (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)) + uTime * 60.0) * 43758.5453) - 0.5) * 0.03;
+  col += grain;
+
+  // filmic-ish tonemap
+  col *= 1.15;
+  col = col / (1.0 + col);
+  col = pow(col, vec3(0.78));
+
+  fragColor = vec4(col, 1.0);
+}
+</script>
+
+<script>
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
+if (!gl) {
+  document.body.innerHTML = '<p style="color:#eee;font-family:sans-serif;padding:2rem">WebGL2 is required for this piece and is not available in this browser.</p>';
+  throw new Error('no webgl2');
+}
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(sh));
+  }
+  return sh;
+}
+
+const vsSrc = document.getElementById('vs').textContent;
+const fsSrc = document.getElementById('fs').textContent;
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, vsSrc));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fsSrc));
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  throw new Error(gl.getProgramInfoLog(program));
+}
+gl.useProgram(program);
+
+// fullscreen triangle
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(program, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uResolution = gl.getUniformLocation(program, 'uResolution');
+const uTime = gl.getUniformLocation(program, 'uTime');
+const uMouse = gl.getUniformLocation(program, 'uMouse');
+const uSeed = gl.getUniformLocation(program, 'uSeed');
+const uWarpSpeed = gl.getUniformLocation(program, 'uWarpSpeed');
+
+let seed = Math.random() * 100.0;
+let warpSpeed = 1.0;
+let mouseTarget = [0, 0];
+let mouseSmooth = [0, 0];
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+  const w = Math.floor(window.innerWidth * dpr);
+  const h = Math.floor(window.innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    gl.viewport(0, 0, w, h);
+  }
+}
+window.addEventListener('resize', resize);
+resize();
+
+function setMouseFromEvent(x, y) {
+  mouseTarget = [
+    (x / window.innerWidth) * 2 - 1,
+    -((y / window.innerHeight) * 2 - 1),
+  ];
+}
+window.addEventListener('pointermove', (e) => setMouseFromEvent(e.clientX, e.clientY));
+window.addEventListener('pointerdown', () => {
+  seed = Math.random() * 100.0;
+  const hint = document.getElementById('hint');
+  hint.classList.remove('faded');
+  clearTimeout(window.__hintTimer);
+  window.__hintTimer = setTimeout(() => hint.classList.add('faded'), 1800);
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === '[') warpSpeed = Math.max(0.1, warpSpeed - 0.1);
+  if (e.key === ']') warpSpeed = Math.min(3.0, warpSpeed + 0.1);
+});
+
+setTimeout(() => document.getElementById('hint').classList.add('faded'), 4000);
+
+const start = performance.now();
+function frame(now) {
+  const t = (now - start) / 1000;
+  mouseSmooth[0] += (mouseTarget[0] - mouseSmooth[0]) * 0.04;
+  mouseSmooth[1] += (mouseTarget[1] - mouseSmooth[1]) * 0.04;
+
+  gl.uniform2f(uResolution, canvas.width, canvas.height);
+  gl.uniform1f(uTime, t);
+  gl.uniform2f(uMouse, mouseSmooth[0], mouseSmooth[1]);
+  gl.uniform1f(uSeed, seed);
+  gl.uniform1f(uWarpSpeed, warpSpeed);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

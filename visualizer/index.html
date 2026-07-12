@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Molten Gold Visualizer</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="layout">
+  <div id="preview-wrap">
+    <canvas id="gl"></canvas>
+    <div id="preview-label">preview</div>
+  </div>
+
+  <div id="sources-panel">
+    <div class="panel-title">Sources</div>
+
+    <div class="source-row" data-layer="gold">
+      <div class="source-row-head">
+        <input type="checkbox" class="src-enabled" checked />
+        <span class="name">Molten Gold</span>
+      </div>
+      <label class="field">Opacity <input type="range" class="src-opacity" min="0" max="1" step="0.01" value="1"></label>
+      <label class="field">Reactivity <input type="range" class="src-reactivity" min="0" max="2" step="0.01" value="1"></label>
+    </div>
+
+    <div class="source-row" data-layer="rings">
+      <div class="source-row-head">
+        <input type="checkbox" class="src-enabled" checked />
+        <span class="name">Beat Rings</span>
+      </div>
+      <label class="field">Opacity <input type="range" class="src-opacity" min="0" max="1" step="0.01" value="0.8"></label>
+      <label class="field">Reactivity <input type="range" class="src-reactivity" min="0" max="2" step="0.01" value="1"></label>
+      <label class="field">Blend
+        <select class="src-blend">
+          <option value="1" selected>Add</option>
+          <option value="0">Normal</option>
+          <option value="2">Screen</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div id="mixer-panel">
+    <div class="channel" id="file-channel">
+      <div class="channel-head"><span class="name">File</span></div>
+      <div class="channel-controls">
+        <button id="file-load-btn">Load</button>
+        <button id="file-play-btn" disabled>Play</button>
+        <button id="file-mute-btn" class="mute-btn">Mute</button>
+      </div>
+      <div class="file-name" id="file-name">no file loaded</div>
+      <input type="range" id="file-gain" min="0" max="1.5" step="0.01" value="0.8">
+      <div class="meter-track"><div class="meter-fill" id="file-meter"></div></div>
+      <input type="file" id="file-input" accept="audio/*">
+    </div>
+
+    <div class="channel" id="mic-channel">
+      <div class="channel-head"><span class="name">Mic</span></div>
+      <div class="channel-controls">
+        <button id="mic-enable-btn">Enable</button>
+        <button id="mic-mute-btn" class="mute-btn">Mute</button>
+      </div>
+      <div class="file-name">live input</div>
+      <input type="range" id="mic-gain" min="0" max="1.5" step="0.01" value="0.8">
+      <div class="meter-track"><div class="meter-fill" id="mic-meter"></div></div>
+    </div>
+
+    <div class="channel" id="master-channel">
+      <div class="channel-head"><span class="name">Master</span></div>
+      <div class="file-name">bass / mid / treble</div>
+      <div class="meter-track"><div class="meter-fill" id="bass-meter" style="background:linear-gradient(90deg,#7a4a1a,#e8a33d)"></div></div>
+      <div class="meter-track"><div class="meter-fill" id="mid-meter" style="background:linear-gradient(90deg,#3d6a7a,#6fcfe0)"></div></div>
+      <div class="meter-track"><div class="meter-fill" id="treble-meter" style="background:linear-gradient(90deg,#8a3d7a,#e06fd0)"></div></div>
+    </div>
+  </div>
+</div>
+
+<script src="audio.js"></script>
+<script src="shaders.js"></script>
+<script src="app.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>
