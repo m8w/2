@@ -243,3 +243,71 @@ chain before debugging further.
 
 If you tell me the specific USB audio interface model, I can give exact menu
 names for its control panel/driver, if it has one.
+
+## Automated sweep: testing every patch in a library for silent output
+
+Manually stepping through every Program by hand (128 per bank × up to 8
+banks) and listening for silence doesn't scale. `tools/supernova_patch_sweep.py`
+automates it: on one or more MIDI channels ("lanes"), it steps through a
+Program bank one number at a time, triggers a chord, records the audio
+arriving on that lane's assigned interface input channel(s), and flags any
+program whose recorded level never rises above a silence threshold.
+
+This matches the "channel 1 changes patch, channel 2 changes a patch ~20s
+later, keep going, for every program in the library" idea directly: each
+`--lane` is one MIDI channel/Performance Part, `--stagger` offsets when each
+lane starts (so their very first note-onsets don't land on top of each
+other), and `--step` is the ~20s given to each program before moving to the
+next.
+
+### One-time setup on the Supernova II
+
+1. Load Performance **C000** (or whichever Performance you're testing from).
+2. Set the **Global MIDI channel** (Global Menu page 1) to a channel none of
+   your test lanes will use, e.g. `16`.
+3. For each Part you're going to sweep (e.g. Part 1, Part 2): press its Part
+   button, then **MIDI** menu page 1, set **MIDI channel** to a fixed value
+   (`1`, `2`, ...) — not `Global`, not `Omni`.
+4. Confirm the **Program Change filter** (Global Menu) isn't set to
+   `Disabled` for those channels, or Program Changes will be ignored.
+5. For genuinely parallel lanes (testing 2+ channels at once with unambiguous
+   per-channel audio): give each Part its own **Part outputs** pair (Output
+   button, e.g. Part 1 → outputs 1&2, Part 2 → outputs 3&4) and wire each
+   pair into separate input channels on your USB interface. Running one lane
+   at a time on a shared stereo bus needs none of this.
+
+### Running it
+
+```bash
+pip install mido python-rtmidi sounddevice numpy
+
+# find your exact MIDI/audio device names first
+python3 tools/supernova_patch_sweep.py --list-devices
+
+# offline check of the script's own logic, no hardware needed
+python3 tools/supernova_patch_sweep.py --selftest
+
+# rehearse timing without touching real MIDI/audio
+python3 tools/supernova_patch_sweep.py --dry-run --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D
+
+# the real run: channel 1 -> interface inputs 0/1, channel 2 -> inputs 2/3,
+# sweep Program banks A-D on both, 20s per program, channel 2 starts 20s
+# after channel 1
+python3 tools/supernova_patch_sweep.py \
+    --midi-port "Supernova" --audio-device "Scarlett" \
+    --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D \
+    --stagger 20 --step 20
+```
+
+Each run writes a timestamped CSV (`lane, channel, bank, program, peak_dbfs,
+rms_dbfs, silent, timestamp`) and prints a live line per program plus a final
+summary of everything flagged `SILENT`. Tune `--threshold` (default -50 dBFS
+RMS) if your interface's noise floor makes that too sensitive or not
+sensitive enough, and `--chord`/`--velocity`/`--note-hold` if a patch needs a
+different trigger to speak (e.g. a higher velocity to clear a velocity
+switch, or a longer hold for a slow attack).
+
+I can't run this against your actual Supernova II / interface from here — I
+verified the script's own logic (ring-buffer timing, dBFS math, CLI parsing,
+multi-lane scheduling) with `--selftest` and `--dry-run`, but the real
+proof is a live run on your hardware.
