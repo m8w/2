@@ -268,72 +268,93 @@ confirmed this routing works.
 > banks A-D and Program banks start at 5). Both scripts now source
 > `BANK_LSB` directly from that table (p.166), checked by `--selftest`.
 
-### How the three targets differ
+### Hardware constraint: outputs 1&2 are dead — this changes which script to use
 
-All three select a slot the same way — Bank Select (CC32) + Program Change
-on the **Global MIDI channel only** (manual, "BANK MESSAGES" table, p.166)
-— so this is always a single sequential sweep, not parallel lanes: changing
-the slot swaps what the whole unit is doing.
+**Outputs 1&2 (and headphones) on the SN2 don't work.** The workaround is
+routing everything through outputs 3&4 instead, wired into the audio
+interface — the Performances in `C000`-`C100` already have all 8 Parts set
+to **Part outputs 3&4** (Output button, p.135).
 
-- **`--target performance`** (`C000`-`C127` etc.): select Performance `N`,
-  broadcast a wide test chord across all 16 MIDI channels (so it doesn't
-  matter which channel any given Part happens to listen on), measure, move
-  on. Silence here means the *whole Performance* (all 8 Parts together)
-  produced nothing.
-- **`--target program`** (`A000`-`H127`): same idea, one raw Program at a
-  time — this switches the whole unit into Program Mode for that single
-  patch. Notes are sent on the Global channel only (Program Mode always
-  listens there).
-- **`--target drum`** (`a000`-`h048`): fundamentally different shape. A Drum
-  Map isn't 49 alternate sounds, it's ~49 *simultaneously* active sounds,
-  one per key from C1 to B4 (manual p.26). So the bank is selected **once**,
-  then the sweep steps through individual **MIDI notes** one at a time —
-  chords don't make sense here, since each note is a different underlying
-  sound.
+This matters because **Output routing only exists in Performance Mode**
+(manual, p.135: *"Output - Button: This button only works in Performance
+Mode."*). Plain Program Mode — which is exactly what `--target program` and
+`--target drum` in `supernova_performance_sweep.py` switch the whole unit
+into — has no output-routing control at all; it always uses the unit's
+fixed default pair. If that pair is the dead 1&2, **every single Program or
+Drum Map would come back `SILENT` regardless of whether the patch itself
+works**, because the audio never reaches the interface in the first place.
 
-### Running it
+**So: `--target program` / `--target drum` are not usable on this hardware
+right now.** `--target performance` is fine and unaffected — Performances
+carry their own Parts' output routing with them (already set to 3&4), so
+switching between Performances never touches Program Mode at all.
+
+For testing raw Programs and Drum Maps, use **`tools/supernova_patch_sweep.py`**
+instead — it never leaves Performance Mode. It changes what a *Part* is
+playing via a Program Change on that Part's own MIDI channel (not the
+Global channel), which swaps the Program/Drum Map loaded into the Part
+while its Output routing (3&4) stays exactly as set (manual, p.41: *"Any
+Program from any one of the Program Banks or any Drum Map can be assigned
+to any Part of a Performance."*).
+
+### Testing Programs and Drum Maps: `supernova_patch_sweep.py`
+
+Load one of your existing `C000`-`C100` Performances (any of them — they're
+all routed to 3&4). Pick one Part on it, give that Part its own fixed MIDI
+channel (not `Global`/`Omni`), and sweep through it:
 
 ```bash
 pip install mido python-rtmidi sounddevice numpy
 
-python3 tools/supernova_performance_sweep.py --list-devices
+python3 tools/supernova_patch_sweep.py --list-devices
 
-python3 tools/supernova_performance_sweep.py --selftest
+python3 tools/supernova_patch_sweep.py --selftest
 
-python3 tools/supernova_performance_sweep.py --target performance --bank C \
+python3 tools/supernova_patch_sweep.py \
     --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
-    --global-channel 16
+    --lane 1:0,1:A,B,C,D,E,F,G,H
 
-python3 tools/supernova_performance_sweep.py --target program --bank ALL \
+python3 tools/supernova_patch_sweep.py \
     --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
-    --global-channel 16
-
-python3 tools/supernova_performance_sweep.py --target drum --bank ALL \
-    --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
-    --global-channel 16
+    --lane 1:0,1:a,b,c,d,e,f,g,h
 ```
 
-`--bank` accepts a single letter, a comma-separated list (`--bank A,B,C`), or
-`ALL` (every valid bank for that `--target`) — so the `program --bank ALL`
-run above sweeps all 1024 Programs (`A000`-`H127`) in one sitting instead of
-8 separate invocations.
+`--lane` is `CH:INPUTS:BANKS` — `CH` is the Part's MIDI channel, `INPUTS` is
+which of the interface's input channels to monitor (`0,1` for
+`USB Audio CODEC`), `BANKS` is which banks to sweep on that Part, in order.
+**Bank letter case matters and picks the behavior**: uppercase `A`-`H` are
+Program banks (steps through Program Change numbers 0-127 with a test
+chord, like before); lowercase `a`-`h` are Drum Maps (selected once, then
+swept note-by-note across C1-B4, since a Drum Map is ~49 simultaneously
+active sounds, one per key, not alternate patches — same idea as
+`--target drum` used to be, just reached the way that actually works on
+this hardware). You can mix both cases in one `--lane` and it'll do the
+right thing per bank, e.g. `--lane 1:0,1:A,B,a,b`.
 
-Rough timing at the defaults: Performances/Programs are 20s/slot (128 slots
-≈ 43 minutes per bank — all 8 Program banks in one `--bank ALL` run ≈ 5.7
-hours); Drum Maps are 2s/note (48 notes ≈ 96 seconds per map, all 8 maps
-≈ 13 minutes). That's long enough you'll likely want to split it across a
-few sittings — narrow any run with `--start`/`--end` (performance/program)
-or `--note-start`/`--note-end` (drum), or just pass a subset of banks
-(`--bank A,B,C`) per sitting.
+**Only run one `--lane` at a time.** The multi-lane/parallel-channel
+feature this script also supports only gives unambiguous results if each
+lane's Part has its *own*, separately-wired Output pair — with everything
+forced onto the single shared 3&4 pair, two lanes' audio would land on the
+same input channels at the same time with no way to tell which Program
+made what sound. (The script now warns about this if you pass more than
+one `--lane`.) `--stagger`/multi-lane stays available for whenever outputs
+1&2 get fixed or you free up another output pair.
 
-Every run writes two files: `sweep_<target>_<banks>_<timestamp>.csv` (full
-detail — `target, bank, number, label, peak_dbfs, rms_dbfs, silent,
+Timing: Program banks default to 20s/slot (128 × 20s ≈ 43 min per bank, all
+8 in one run ≈ 5.7 hours); Drum banks default to 2s/note (48 notes ≈ 96s
+per map, all 8 ≈ 13 min) — override with `--drum-step`/`--drum-note-hold`
+if needed. That's long enough to want to split across sittings; there's no
+`--bank ALL` shorthand here (unlike `supernova_performance_sweep.py`) —
+just list the banks you want in `--lane`'s BANKS field, e.g. `A,B,C` for a
+shorter session.
+
+Every run writes two files: `sweep_results_<timestamp>.csv` (full detail —
+`lane, channel, bank, number, label, peak_dbfs, rms_dbfs, silent,
 timestamp`) and `..._dead.txt` (just the labels flagged silent, one per
-line, e.g. `A017`) — that second file is your running "steer clear of
-these" list for reprogramming Performance Parts. Re-running later (e.g.
-after narrowing with `--start`/`--end` to double-check a few) overwrites
-that run's own files; if you want one master list across multiple sittings,
-just `cat` the `_dead.txt` files together and dedupe.
+line, e.g. `A017` or `a C1 (note 36)`) — that second file is your running
+"steer clear of these" list for reprogramming Performance Parts. Running it
+again later (e.g. a different bank subset) writes new files each time; for
+one master list across sessions, `cat` the `_dead.txt` files together.
 
 **Caveats these scripts can't remove**:
 - *Performance* sweep: broadcasting across all 16 channels only proves
@@ -358,8 +379,9 @@ manual:
   assigned" state (p.42).
 - **Part Muted** — mute state is saved with the Performance (p.42); press
   Mute then the Part button to check/clear it.
-- **Part Volume** at/near 0, or **Output** routed to a pair (3-8) you're
-  not monitoring (Output menu, p.135).
+- **Part Volume** at/near 0, or **Output** not actually routed to 3&4 on
+  that Part (Output menu, p.135) — worth double-checking given the
+  workaround in play here.
 - **Range** excludes every note you're testing with.
 - A raw Program itself is genuinely silent (e.g. all Oscillator mix levels
   at 0) — rebuild or replace it.
@@ -367,32 +389,22 @@ manual:
   Oscillator levels are at 0 (Drum Map Programs are edited exactly like
   normal Programs, p.3409-3431 of the manual text).
 
-### The other script: `supernova_patch_sweep.py`
+### `supernova_performance_sweep.py` — still the right tool for Performances
 
-This one is for a narrower case: auditioning raw Programs **per Performance
-Part**, independently, potentially in parallel across multiple Parts at
-once (multi-channel "lanes") — e.g. building fresh Parts for a new
-Performance and checking each candidate patch before assigning it, without
-leaving Performance mode. It matches "channel 1 changes patch, channel 2
-changes a patch ~20s later, keep going" only when the thing changing
-per-channel is a Part's Program, not a whole-unit Program Mode switch.
+`--target performance --bank C` (or `--bank ALL` for all four Performance
+banks) is unaffected by the broken-output issue and remains the way to
+sweep whole Performances:
 
 ```bash
-python3 tools/supernova_patch_sweep.py --list-devices
-python3 tools/supernova_patch_sweep.py --selftest
-python3 tools/supernova_patch_sweep.py --dry-run --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D
-
-python3 tools/supernova_patch_sweep.py \
+python3 tools/supernova_performance_sweep.py --target performance --bank C \
     --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
-    --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D \
-    --stagger 20 --step 20
+    --global-channel 16
 ```
 
-(Last command: channel 1 → interface inputs 0/1, channel 2 → inputs 2/3,
-sweep Program banks A-D on both, 20s per program, channel 2 starting 20s
-after channel 1. Setup for this one is different from the Global-channel
-scripts above — see the script's own `--help`/docstring: it needs each
-Part given its own non-Global MIDI channel first.)
+Its `--target program`/`--target drum` modes still exist in the script and
+still pass `--selftest`/`--dry-run` (the logic is sound), but don't use
+them on this hardware until outputs 1&2 are working again — use
+`supernova_patch_sweep.py` for Programs/Drums instead, per above.
 
 Both scripts share `tools/sn2_audio.py` for the audio-capture/dBFS logic —
 `--selftest` on either exercises that shared code too.
@@ -400,9 +412,6 @@ Both scripts share `tools/sn2_audio.py` for the audio-capture/dBFS logic —
 I can't run these against your actual Supernova II / interface from this
 session — I verified the pure logic (ring-buffer timing, dBFS math, Bank
 Select LSB values against the manual's table, the C1-B4/note-name math for
-Drum Maps, CLI parsing, sweep scheduling for all three targets) with
-`--selftest` and `--dry-run`, catching a couple of my own bugs along the
-way (the off-by-one bank table, and an argparse `--bank required=True`
-that would have blocked `--selftest`/`--list-devices` outright), but the
-real proof is a live run on your hardware — which you've now confirmed
-routes correctly.
+Drum Maps, CLI parsing, sweep scheduling, mixed Program/Drum bank lanes)
+with `--selftest` and `--dry-run` on both scripts, but the real proof is a
+live run on your hardware.

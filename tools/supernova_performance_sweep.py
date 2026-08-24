@@ -59,7 +59,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from sn2_audio import AudioMonitor, run_selftest as run_audio_selftest
+from sn2_audio import (
+    AudioMonitor,
+    DRUM_NOTE_END,
+    DRUM_NOTE_START,
+    note_name,
+    run_selftest as run_audio_selftest,
+)
 
 # Bank Select LSB (CC32 value) per target, per the manual's "BANK MESSAGES"
 # table (p.166): 0=Favourites, 1-4=Performance banks A-D, 5-12=Program banks
@@ -75,19 +81,6 @@ BANK_LSB = {
 # false "silent" flags caused by range gaps rather than an actually broken
 # patch. Also used for raw Program testing.
 DEFAULT_CHORD = [36, 40, 43, 48, 52, 55, 60, 64, 67, 72, 76, 79]
-
-# Drum Maps assign one Program per note from C1 to B4 (manual p.26) — note
-# numbers per the Supernova II's own convention, confirmed elsewhere in the
-# manual ("Drum played as" range is C-2 to G8, i.e. MIDI note 0 = C-2).
-DRUM_NOTE_START = 36  # C1
-DRUM_NOTE_END = 83    # B4
-
-_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
-
-def note_name(n: int) -> str:
-    octave = n // 12 - 2
-    return f"{_NOTE_NAMES[n % 12]}{octave}"
 
 
 @dataclass
@@ -254,11 +247,6 @@ def run_selftest() -> bool:
     check("Prog bank H is Bank Select LSB 12", BANK_LSB["program"]["H"] == 12)
     check("Drum bank a is Bank Select LSB 18", BANK_LSB["drum"]["a"] == 18)
     check("Drum bank h is Bank Select LSB 25", BANK_LSB["drum"]["h"] == 25)
-
-    check("note_name(0) is C-2 (manual's MIDI-0 reference point)", note_name(0) == "C-2")
-    check("note_name(127) is G8", note_name(127) == "G8")
-    check("note_name(36) is C1 (Drum Map range start)", note_name(36) == "C1")
-    check("note_name(83) is B4 (Drum Map range end)", note_name(83) == "B4")
 
     class PerfArgs:
         target = "performance"

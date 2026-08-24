@@ -23,6 +23,20 @@ def rms_of(samples: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
 
 
+# Drum Maps assign one Program per note from C1 to B4 (manual p.26) — note
+# numbers per the Supernova II's own convention, confirmed elsewhere in the
+# manual ("Drum played as" range is C-2 to G8, i.e. MIDI note 0 = C-2).
+DRUM_NOTE_START = 36  # C1
+DRUM_NOTE_END = 83    # B4
+
+_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def note_name(n: int) -> str:
+    octave = n // 12 - 2
+    return f"{_NOTE_NAMES[n % 12]}{octave}"
+
+
 class RingBuffer:
     """Fixed-length multi-channel audio ring buffer indexed by wall-clock time."""
 
@@ -125,6 +139,11 @@ def run_selftest() -> bool:
     check("silence is very negative dBFS", dbfs(0.0) < -100)
     check("full scale is ~0 dBFS", abs(dbfs(1.0)) < 1e-6)
     check("half amplitude is about -6dBFS", abs(dbfs(0.5) - (-6.02)) < 0.1)
+
+    check("note_name(0) is C-2 (manual's MIDI-0 reference point)", note_name(0) == "C-2")
+    check("note_name(127) is G8", note_name(127) == "G8")
+    check("note_name(36) is C1 (Drum Map range start)", note_name(36) == "C1")
+    check("note_name(83) is B4 (Drum Map range end)", note_name(83) == "B4")
 
     sr = 1000
     rb = RingBuffer(seconds=2.0, samplerate=sr, channels=2)
