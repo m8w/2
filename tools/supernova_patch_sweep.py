@@ -25,8 +25,7 @@ Example — two lanes (Parts on MIDI ch 1 and 2, routed to interface inputs
 0/1 and 2/3), sweeping Program banks A-D, one program every 20s, second lane
 starting 20s after the first:
 
-    python3 supernova_patch_sweep.py \\
-        --list-devices                       # find exact names first
+    python3 supernova_patch_sweep.py --list-devices
     python3 supernova_patch_sweep.py \\
         --midi-port "Supernova" --audio-device "Scarlett" \\
         --lane 1:0,1:A,B,C,D \\

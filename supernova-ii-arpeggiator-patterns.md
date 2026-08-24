@@ -286,21 +286,22 @@ Setup: note your Supernova II's **Global MIDI channel** (Global Menu page 1)
 ```bash
 pip install mido python-rtmidi sounddevice numpy
 
-# find exact MIDI/audio device names — you already confirmed the audio
-# interface is "USB Audio CODEC" from Logic's track inspector
 python3 tools/supernova_performance_sweep.py --list-devices
 
-# offline check of the script's own logic, no hardware needed
 python3 tools/supernova_performance_sweep.py --selftest
 
-# rehearse timing without touching real MIDI/audio
 python3 tools/supernova_performance_sweep.py --dry-run --bank C --step 1
 
-# the real run: Performance bank C, all 128 slots, 20s each
 python3 tools/supernova_performance_sweep.py \
     --midi-port "Supernova" --audio-device "USB Audio CODEC" \
     --global-channel 1 --bank C --step 20
 ```
+
+(In order: find exact MIDI/audio device names — you already confirmed the
+audio interface is "USB Audio CODEC" from Logic's track inspector; an
+offline check of the script's own logic with no hardware needed; a timing
+rehearsal that doesn't touch real MIDI/audio; then the real run — Performance
+bank C, all 128 slots, 20s each.)
 
 That's ~128 × 20s ≈ 43 minutes for the full bank. Narrow it with `--start`/
 `--end` to re-check just a range (e.g. re-testing after fixing a few slots).
@@ -370,13 +371,15 @@ python3 tools/supernova_patch_sweep.py --list-devices
 python3 tools/supernova_patch_sweep.py --selftest
 python3 tools/supernova_patch_sweep.py --dry-run --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D
 
-# channel 1 -> interface inputs 0/1, channel 2 -> inputs 2/3, sweep Program
-# banks A-D on both, 20s per program, channel 2 starts 20s after channel 1
 python3 tools/supernova_patch_sweep.py \
     --midi-port "Supernova" --audio-device "USB Audio CODEC" \
     --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D \
     --stagger 20 --step 20
 ```
+
+(Last command: channel 1 → interface inputs 0/1, channel 2 → inputs 2/3,
+sweep Program banks A-D on both, 20s per program, channel 2 starting 20s
+after channel 1.)
 
 Both scripts share `tools/sn2_audio.py` for the audio-capture/dBFS logic —
 `--selftest` on either exercises that shared code too.
