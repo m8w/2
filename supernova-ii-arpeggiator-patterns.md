@@ -244,44 +244,54 @@ chain before debugging further.
 If you tell me the specific USB audio interface model, I can give exact menu
 names for its control panel/driver, if it has one.
 
-## Automated sweep: testing every patch/Performance in a library for silence
+## Automated sweep: testing every patch/Performance/Drum sound for silence
 
 Manually stepping through every slot by hand and listening for silence
-doesn't scale — a Performance bank alone is 128 slots. Two scripts under
-`tools/` automate this; which one you want depends on what you're actually
-sweeping:
+doesn't scale — Performances alone are 128 slots, Programs are 1024, Drum
+Maps add ~392 more (8 maps × 49 sounds). `tools/supernova_performance_sweep.py`
+covers all three via `--target performance|program|drum`; a second script,
+`tools/supernova_patch_sweep.py`, covers a different, narrower case (see
+below). Both flag anything whose recorded audio never rises above a silence
+threshold and write a CSV report.
 
-- **`supernova_performance_sweep.py`** — sweeps whole **Performances**
-  (e.g. `C000`–`C127`). This is the one for "some patches in my C000-C127
-  library are silent, find out which." A Performance change is a single
-  Bank Select + Program Change on the **Global MIDI channel only** and
-  swaps all 8 Parts of the unit at once — there's no way to parallelize
-  this across lanes, so it's a straightforward sequential loop.
-- **`supernova_patch_sweep.py`** — sweeps individual **Programs** within a
-  Program bank (`A`-`H`), independently per MIDI channel/Part, optionally
-  in parallel "lanes". Use this if you're instead auditioning raw Programs
-  (not whole Performances) across multiple Parts at once.
-
-Both flag anything whose recorded audio never rises above a silence
-threshold, and write a CSV report.
+**Confirmed working on your hardware**: the SN2 has no native USB MIDI —
+it's daisy-chained through the microKORG XL's DIN ports, which is the actual
+USB-MIDI bridge to the Mac mini. The port that reaches the SN2 is
+`microKORG XL MIDI OUT` (sending to this CoreMIDI destination drives the
+microKORG's physical MIDI OUT jack, wired into the SN2's MIDI IN). Your
+Global MIDI channel is `16`. A one-shot test (`Perf C000` selection) already
+confirmed this routing works.
 
 > **Correction**: an earlier version of this doc/script had the Program
 > Bank Select values off by one (used `A=4..H=11`; the manual's own "BANK
 > MESSAGES" table gives `A=5..H=12`, since LSB values 1-4 are Performance
-> banks A-D and Program banks start at 5). Fixed in both scripts — the
-> shared `BANK_LSB`/`PERF_BANK_LSB` tables are now sourced directly from
-> that table (p.166) and checked by `--selftest`.
+> banks A-D and Program banks start at 5). Both scripts now source
+> `BANK_LSB` directly from that table (p.166), checked by `--selftest`.
 
-### Sweeping Performances (`C000`-`C127`) — your current case
+### How the three targets differ
 
-Since your Logic session already shows the 8 Parts are static and only the
-Performance selection changes, this is a single-channel, single-threaded
-sweep: select Performance `N`, broadcast a wide test chord across every
-MIDI channel (so it doesn't matter which channel any given Part happens to
-listen on), measure, move to the next `N`.
+All three select a slot the same way — Bank Select (CC32) + Program Change
+on the **Global MIDI channel only** (manual, "BANK MESSAGES" table, p.166)
+— so this is always a single sequential sweep, not parallel lanes: changing
+the slot swaps what the whole unit is doing.
 
-Setup: note your Supernova II's **Global MIDI channel** (Global Menu page 1)
-— Performance Bank Select/Program Change is only recognised there.
+- **`--target performance`** (`C000`-`C127` etc.): select Performance `N`,
+  broadcast a wide test chord across all 16 MIDI channels (so it doesn't
+  matter which channel any given Part happens to listen on), measure, move
+  on. Silence here means the *whole Performance* (all 8 Parts together)
+  produced nothing.
+- **`--target program`** (`A000`-`H127`): same idea, one raw Program at a
+  time — this switches the whole unit into Program Mode for that single
+  patch. Notes are sent on the Global channel only (Program Mode always
+  listens there).
+- **`--target drum`** (`a000`-`h048`): fundamentally different shape. A Drum
+  Map isn't 49 alternate sounds, it's ~49 *simultaneously* active sounds,
+  one per key from C1 to B4 (manual p.26). So the bank is selected **once**,
+  then the sweep steps through individual **MIDI notes** one at a time —
+  chords don't make sense here, since each note is a different underlying
+  sound.
+
+### Running it
 
 ```bash
 pip install mido python-rtmidi sounddevice numpy
@@ -290,81 +300,69 @@ python3 tools/supernova_performance_sweep.py --list-devices
 
 python3 tools/supernova_performance_sweep.py --selftest
 
-python3 tools/supernova_performance_sweep.py --dry-run --bank C --step 1
+python3 tools/supernova_performance_sweep.py --target performance --bank C \
+    --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
+    --global-channel 16
 
-python3 tools/supernova_performance_sweep.py \
-    --midi-port "Supernova" --audio-device "USB Audio CODEC" \
-    --global-channel 1 --bank C --step 20
+python3 tools/supernova_performance_sweep.py --target program --bank A \
+    --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
+    --global-channel 16
+
+python3 tools/supernova_performance_sweep.py --target drum --bank a \
+    --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
+    --global-channel 16
 ```
 
-(In order: find exact MIDI/audio device names — you already confirmed the
-audio interface is "USB Audio CODEC" from Logic's track inspector; an
-offline check of the script's own logic with no hardware needed; a timing
-rehearsal that doesn't touch real MIDI/audio; then the real run — Performance
-bank C, all 128 slots, 20s each.)
+Rough timing at the defaults: Performances/Programs are 20s/slot (128 slots
+≈ 43 minutes per bank — 8 Program banks ≈ 5.7 hours if you sweep all of
+`A`-`H`); Drum Maps are 2s/note (48 notes ≈ 96 seconds per map, all 8 maps
+≈ 13 minutes). Narrow any run with `--start`/`--end` (performance/program)
+or `--note-start`/`--note-end` (drum) to re-check just a range after fixing
+something. Output is `sweep_<target>_<bank>_<timestamp>.csv`
+(`target, bank, number, label, peak_dbfs, rms_dbfs, silent, timestamp`) plus
+a printed summary of every `SILENT` entry.
 
-That's ~128 × 20s ≈ 43 minutes for the full bank. Narrow it with `--start`/
-`--end` to re-check just a range (e.g. re-testing after fixing a few slots).
-Output is `perf_sweep_C_<timestamp>.csv` (`bank, performance, peak_dbfs,
-rms_dbfs, silent, timestamp`) plus a printed summary of every `SILENT`
-Performance number — that list is what you actually go fix (see below).
+**Caveats these scripts can't remove**:
+- *Performance* sweep: broadcasting across all 16 channels only proves
+  *something* on some Part responded — if a Part's **Range** excludes every
+  chord note, that Part alone looks silent even if it's fine. The flag is on
+  the whole Performance, not a specific Part.
+- *Drum* sweep: some notes in the C1-B4 range are legitimately meant to be
+  unmapped/empty in a given kit — a `SILENT` flag there just means "nothing
+  assigned or it's not sounding," which you'll want to eyeball against what
+  that Drum Map is supposed to contain rather than treat as automatically
+  broken.
 
-**Caveat this script can't remove**: broadcasting the chord across all 16
-channels only proves *something* on some Part responded. If a Part's
-**Range** doesn't include any of the chord notes (`--chord` defaults to a
-3-octave spread specifically to reduce this), that Part alone would look
-silent even if it's fine — the flag is on the whole Performance, not a
-specific Part. Treat `SILENT` results as "go look at this one," not
-automatically "this patch is broken."
+Treat every `SILENT` result as "go look at this one," not automatically
+"this patch is broken."
 
-### Fixing a Performance flagged silent
+### Fixing something flagged silent
 
-Once you have the list of silent `C0xx` numbers, the usual causes (from the
-Performance/Part Edit sections of the manual) to check on each, in
-Performance mode:
+Common causes, from the Performance/Part Edit/Program sections of the
+manual:
 
-- **Polyphony = Off** for the Part (Polyphony menu) — this is the
-  "no Program assigned" state (p.42).
+- **Polyphony = Off** for a Part (Polyphony menu) — the "no Program
+  assigned" state (p.42).
 - **Part Muted** — mute state is saved with the Performance (p.42); press
   Mute then the Part button to check/clear it.
 - **Part Volume** at/near 0, or **Output** routed to a pair (3-8) you're
   not monitoring (Output menu, p.135).
 - **Range** excludes every note you're testing with.
-- **MIDI channel** for the Part set to something other than what's actually
-  being played into it (only matters if you're triggering on a single
-  channel rather than this script's broadcast-to-all-16 approach).
-- The Program assigned to that Part is itself genuinely silent (e.g. all
-  Oscillator mix levels at 0) — rebuild or replace it.
+- A raw Program itself is genuinely silent (e.g. all Oscillator mix levels
+  at 0) — rebuild or replace it.
+- A Drum Map slot has nothing assigned to that note, or its Program's own
+  Oscillator levels are at 0 (Drum Map Programs are edited exactly like
+  normal Programs, p.3409-3431 of the manual text).
 
-### Sweeping raw Programs (`A000`-`H127`), independently per Part
+### The other script: `supernova_patch_sweep.py`
 
-If instead you want to audition individual Programs (not whole
-Performances) — e.g. building fresh Parts for a new Performance and
-checking each candidate patch makes sound before assigning it — use
-`supernova_patch_sweep.py`. This one *can* run multiple MIDI channels/Parts
-in parallel ("lanes"), since each Part's own Program can be changed
-independently without affecting the rest of the unit. It matches the
-original "channel 1 changes patch, channel 2 changes a patch ~20s later,
-keep going" idea when the thing changing per-channel is the raw Program,
-not the whole Performance.
-
-#### One-time setup on the Supernova II
-
-1. Load whichever Performance you're testing Parts from.
-2. Set the **Global MIDI channel** (Global Menu page 1) to a channel none of
-   your test lanes will use, e.g. `16`.
-3. For each Part you're going to sweep (e.g. Part 1, Part 2): press its Part
-   button, then **MIDI** menu page 1, set **MIDI channel** to a fixed value
-   (`1`, `2`, ...) — not `Global`, not `Omni`.
-4. Confirm the **Program Change filter** (Global Menu) isn't set to
-   `Disabled` for those channels, or Program Changes will be ignored.
-5. For genuinely parallel lanes (testing 2+ channels at once with unambiguous
-   per-channel audio): give each Part its own **Part outputs** pair (Output
-   button, e.g. Part 1 → outputs 1&2, Part 2 → outputs 3&4) and wire each
-   pair into separate input channels on your USB interface. Running one lane
-   at a time on a shared stereo bus needs none of this.
-
-#### Running it
+This one is for a narrower case: auditioning raw Programs **per Performance
+Part**, independently, potentially in parallel across multiple Parts at
+once (multi-channel "lanes") — e.g. building fresh Parts for a new
+Performance and checking each candidate patch before assigning it, without
+leaving Performance mode. It matches "channel 1 changes patch, channel 2
+changes a patch ~20s later, keep going" only when the thing changing
+per-channel is a Part's Program, not a whole-unit Program Mode switch.
 
 ```bash
 python3 tools/supernova_patch_sweep.py --list-devices
@@ -372,21 +370,26 @@ python3 tools/supernova_patch_sweep.py --selftest
 python3 tools/supernova_patch_sweep.py --dry-run --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D
 
 python3 tools/supernova_patch_sweep.py \
-    --midi-port "Supernova" --audio-device "USB Audio CODEC" \
+    --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
     --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D \
     --stagger 20 --step 20
 ```
 
 (Last command: channel 1 → interface inputs 0/1, channel 2 → inputs 2/3,
 sweep Program banks A-D on both, 20s per program, channel 2 starting 20s
-after channel 1.)
+after channel 1. Setup for this one is different from the Global-channel
+scripts above — see the script's own `--help`/docstring: it needs each
+Part given its own non-Global MIDI channel first.)
 
 Both scripts share `tools/sn2_audio.py` for the audio-capture/dBFS logic —
 `--selftest` on either exercises that shared code too.
 
-I can't run either script against your actual Supernova II / interface from
-this session — I verified the pure logic (ring-buffer timing, dBFS math,
-Bank Select LSB values against the manual's table, CLI parsing, sweep
-scheduling) with `--selftest` and `--dry-run`, catching and fixing the
-off-by-one bank bug along the way, but the real proof is a live run on your
-hardware.
+I can't run these against your actual Supernova II / interface from this
+session — I verified the pure logic (ring-buffer timing, dBFS math, Bank
+Select LSB values against the manual's table, the C1-B4/note-name math for
+Drum Maps, CLI parsing, sweep scheduling for all three targets) with
+`--selftest` and `--dry-run`, catching a couple of my own bugs along the
+way (the off-by-one bank table, and an argparse `--bank required=True`
+that would have blocked `--selftest`/`--list-devices` outright), but the
+real proof is a live run on your hardware — which you've now confirmed
+routes correctly.

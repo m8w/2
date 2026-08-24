@@ -1,36 +1,41 @@
 #!/usr/bin/env python3
-"""Sweep every Performance in a Novation Supernova II Performance bank
-(e.g. C000-C127) and flag any that produce no audible output.
+"""Sweep a Novation Supernova II library and flag anything producing no
+audible output. Covers all three "kinds" of sound the manual defines
+(p.27, "About Programs"/"About Drum Maps"): --target performance
+(C000-C127 etc.), --target program (raw Programs, A000-H127), and
+--target drum (Drum Maps a000-h048).
 
-Performance selection is fundamentally different from Program selection: a
-Bank Select (CC32) + Program Change for a Performance bank is only
-recognised on the Supernova II's Global MIDI channel (per the "BANK
-MESSAGES" table in the manual), and it swaps the *whole unit* — all 8 Parts
-at once. So unlike supernova_patch_sweep.py's per-Part "lanes", this script
-is a single sequential loop: select a Performance, trigger notes, measure,
-move on.
+All three are selected the same way — Bank Select (CC32) + Program Change,
+recognised ONLY on the Supernova II's Global MIDI channel (manual, "BANK
+MESSAGES" table, p.166) — so this is always a single sequential loop, never
+parallel lanes: selecting a new slot swaps what the whole unit is doing.
 
-Because a Performance's 8 Parts can each be set to listen on a different
-MIDI channel (Global, Omni, or 1-16), and you may not know each Performance's
-per-Part channel assignments in advance, this script broadcasts the test
-chord across a configurable set of channels (default: 1-16) so a Part is
-triggered regardless of which channel it's listening on. This trades a
-little precision (you get "the Performance made no sound on any of these
-channels", not "which Part failed") for not missing real silence just
-because of a channel mismatch.
+Performances and Programs are tested the same way: select slot N, trigger a
+chord, measure, move to N+1. Drum Maps are different — a Drum Map is not
+128 alternate sounds, it's ~49 *simultaneously* active sounds, one per key
+from C1 to B4 (manual p.26). So for --target drum, the bank is selected
+ONCE, then the sweep steps through individual MIDI notes one at a time
+(chords don't make sense here — each note is a different underlying sound).
 
 One-time setup on the Supernova II:
   - Note the Global MIDI channel (Global Menu page 1) and pass it with
-    --global-channel — Bank Select/Program Change for Performances only
-    works on that channel.
-  - Nothing else needs to change; Parts can stay however they're configured.
+    --global-channel — Bank Select/Program Change only works there.
 
-Example — sweep Performance bank C, all 128 slots, 20s each:
+Examples:
 
     python3 supernova_performance_sweep.py --list-devices
-    python3 supernova_performance_sweep.py \\
-        --midi-port "Supernova" --audio-device "USB Audio CODEC" \\
-        --global-channel 1 --bank C --step 20
+
+    python3 supernova_performance_sweep.py --target performance --bank C \\
+        --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \\
+        --global-channel 16
+
+    python3 supernova_performance_sweep.py --target program --bank A \\
+        --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \\
+        --global-channel 16
+
+    python3 supernova_performance_sweep.py --target drum --bank a \\
+        --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \\
+        --global-channel 16
 
 Dependencies: pip install mido python-rtmidi sounddevice numpy
 """
@@ -46,21 +51,41 @@ from datetime import datetime
 
 from sn2_audio import AudioMonitor, run_selftest as run_audio_selftest
 
-# Performance bank -> Bank Select LSB (CC32 value). Recognised ONLY on the
-# Global MIDI channel (manual, "BANK MESSAGES" table).
-PERF_BANK_LSB = {"A": 1, "B": 2, "C": 3, "D": 4}
+# Bank Select LSB (CC32 value) per target, per the manual's "BANK MESSAGES"
+# table (p.166): 0=Favourites, 1-4=Performance banks A-D, 5-12=Program banks
+# A-H, 13-14=Arp Mono/Poly, 15-17=Arp User U/V/W, 18-25=Drum Maps a-h.
+BANK_LSB = {
+    "performance": {"A": 1, "B": 2, "C": 3, "D": 4},
+    "program": {"A": 5, "B": 6, "C": 7, "D": 8, "E": 9, "F": 10, "G": 11, "H": 12},
+    "drum": {"a": 18, "b": 19, "c": 20, "d": 21, "e": 22, "f": 23, "g": 24, "h": 25},
+}
 
 # A chord spanning 3 octaves, so a Performance whose Parts have narrow/split
 # key Ranges is still likely to have at least one Part triggered, reducing
 # false "silent" flags caused by range gaps rather than an actually broken
-# patch.
+# patch. Also used for raw Program testing.
 DEFAULT_CHORD = [36, 40, 43, 48, 52, 55, 60, 64, 67, 72, 76, 79]
+
+# Drum Maps assign one Program per note from C1 to B4 (manual p.26) — note
+# numbers per the Supernova II's own convention, confirmed elsewhere in the
+# manual ("Drum played as" range is C-2 to G8, i.e. MIDI note 0 = C-2).
+DRUM_NOTE_START = 36  # C1
+DRUM_NOTE_END = 83    # B4
+
+_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def note_name(n: int) -> str:
+    octave = n // 12 - 2
+    return f"{_NOTE_NAMES[n % 12]}{octave}"
 
 
 @dataclass
 class Result:
+    target: str
     bank: str
-    performance: int
+    number: int          # Performance/Program number, or (for drum) the MIDI note tested
+    label: str
     peak_dbfs: float
     rms_dbfs: float
     silent: bool
@@ -68,7 +93,7 @@ class Result:
 
 
 class MidiOut:
-    def select_performance(self, global_channel: int, bank: str, number: int):
+    def select_slot(self, global_channel: int, target: str, bank: str, number: int):
         raise NotImplementedError
 
     def note_on(self, channels: list[int], notes: list[int], velocity: int):
@@ -91,9 +116,9 @@ class RealMidiOut(MidiOut):
             )
         self.port = mido.open_output(candidates[0])
 
-    def select_performance(self, global_channel: int, bank: str, number: int):
+    def select_slot(self, global_channel: int, target: str, bank: str, number: int):
         ch0 = global_channel - 1
-        self.port.send(self.mido.Message("control_change", channel=ch0, control=32, value=PERF_BANK_LSB[bank]))
+        self.port.send(self.mido.Message("control_change", channel=ch0, control=32, value=BANK_LSB[target][bank]))
         self.port.send(self.mido.Message("program_change", channel=ch0, program=number))
 
     def note_on(self, channels: list[int], notes: list[int], velocity: int):
@@ -110,7 +135,7 @@ class RealMidiOut(MidiOut):
 
 
 class DryRunMidiOut(MidiOut):
-    def select_performance(self, global_channel, bank, number):
+    def select_slot(self, global_channel, target, bank, number):
         pass
 
     def note_on(self, channels, notes, velocity):
@@ -120,11 +145,32 @@ class DryRunMidiOut(MidiOut):
         pass
 
 
-def sweep(midi: MidiOut, monitor, args) -> list[Result]:
+def _measure_and_log(midi, monitor, args, note_time, notes_held, target, bank, number, label) -> Result:
+    measurement = None
+    if monitor is not None:
+        measurement = monitor.measure(args.input_channels, note_time, args.note_hold + 0.3)
+    peak, rms = measurement if measurement else (float("-inf"), float("-inf"))
+    silent = rms < args.threshold
+    result = Result(
+        target=target,
+        bank=bank,
+        number=number,
+        label=label,
+        peak_dbfs=peak,
+        rms_dbfs=rms,
+        silent=silent,
+        timestamp=datetime.now().isoformat(timespec="seconds"),
+    )
+    flag = "SILENT" if silent else "ok"
+    print(f"{label}  peak={peak:6.1f}dBFS  rms={rms:6.1f}dBFS  {flag}")
+    return result
+
+
+def sweep_performance_or_program(midi: MidiOut, monitor, args) -> list[Result]:
     results: list[Result] = []
     for number in range(args.start, args.end + 1):
         t0 = time.time()
-        midi.select_performance(args.global_channel, args.bank, number)
+        midi.select_slot(args.global_channel, args.target, args.bank, number)
         time.sleep(args.settle)
 
         note_time = time.time()
@@ -132,26 +178,38 @@ def sweep(midi: MidiOut, monitor, args) -> list[Result]:
         time.sleep(args.note_hold)
         midi.note_off(args.note_channels, args.chord)
 
-        measurement = None
-        if monitor is not None:
-            measurement = monitor.measure(args.input_channels, note_time, args.note_hold + 0.3)
-        peak, rms = measurement if measurement else (float("-inf"), float("-inf"))
-        silent = rms < args.threshold
-        result = Result(
-            bank=args.bank,
-            performance=number,
-            peak_dbfs=peak,
-            rms_dbfs=rms,
-            silent=silent,
-            timestamp=datetime.now().isoformat(timespec="seconds"),
-        )
-        results.append(result)
-        flag = "SILENT" if silent else "ok"
-        print(f"{args.bank}{number:03d}  peak={peak:6.1f}dBFS  rms={rms:6.1f}dBFS  {flag}")
+        label = f"{args.bank}{number:03d}"
+        results.append(_measure_and_log(midi, monitor, args, note_time, args.chord, args.target, args.bank, number, label))
 
         elapsed = time.time() - t0
         time.sleep(max(0.0, args.step - elapsed))
     return results
+
+
+def sweep_drum(midi: MidiOut, monitor, args) -> list[Result]:
+    midi.select_slot(args.global_channel, "drum", args.bank, 0)
+    time.sleep(args.settle)
+
+    results: list[Result] = []
+    for note in range(args.note_start, args.note_end + 1):
+        t0 = time.time()
+        note_time = time.time()
+        midi.note_on(args.note_channels, [note], args.velocity)
+        time.sleep(args.note_hold)
+        midi.note_off(args.note_channels, [note])
+
+        label = f"{args.bank} {note_name(note)} (note {note})"
+        results.append(_measure_and_log(midi, monitor, args, note_time, [note], "drum", args.bank, note, label))
+
+        elapsed = time.time() - t0
+        time.sleep(max(0.0, args.step - elapsed))
+    return results
+
+
+def sweep(midi: MidiOut, monitor, args) -> list[Result]:
+    if args.target == "drum":
+        return sweep_drum(midi, monitor, args)
+    return sweep_performance_or_program(midi, monitor, args)
 
 
 def run_selftest() -> bool:
@@ -162,11 +220,20 @@ def run_selftest() -> bool:
         print(f"  {'PASS' if cond else 'FAIL'}: {name}")
         ok = ok and cond
 
-    check("Perf bank A is Bank Select LSB 1", PERF_BANK_LSB["A"] == 1)
-    check("Perf bank C is Bank Select LSB 3", PERF_BANK_LSB["C"] == 3)
-    check("Perf bank D is Bank Select LSB 4", PERF_BANK_LSB["D"] == 4)
+    check("Perf bank A is Bank Select LSB 1", BANK_LSB["performance"]["A"] == 1)
+    check("Perf bank C is Bank Select LSB 3", BANK_LSB["performance"]["C"] == 3)
+    check("Prog bank A is Bank Select LSB 5", BANK_LSB["program"]["A"] == 5)
+    check("Prog bank H is Bank Select LSB 12", BANK_LSB["program"]["H"] == 12)
+    check("Drum bank a is Bank Select LSB 18", BANK_LSB["drum"]["a"] == 18)
+    check("Drum bank h is Bank Select LSB 25", BANK_LSB["drum"]["h"] == 25)
 
-    class Args:
+    check("note_name(0) is C-2 (manual's MIDI-0 reference point)", note_name(0) == "C-2")
+    check("note_name(127) is G8", note_name(127) == "G8")
+    check("note_name(36) is C1 (Drum Map range start)", note_name(36) == "C1")
+    check("note_name(83) is B4 (Drum Map range end)", note_name(83) == "B4")
+
+    class PerfArgs:
+        target = "performance"
         bank = "C"
         start = 0
         end = 2
@@ -180,10 +247,29 @@ def run_selftest() -> bool:
         threshold = -50.0
         input_channels = [0, 1]
 
-    results = sweep(DryRunMidiOut(), None, Args())
-    check("dry-run sweep covers start..end inclusive", len(results) == 3)
-    check("dry-run sweep numbers in order", [r.performance for r in results] == [0, 1, 2])
-    check("dry-run sweep flags silent (no monitor)", all(r.silent for r in results))
+    results = sweep(DryRunMidiOut(), None, PerfArgs())
+    check("performance dry-run covers start..end inclusive", len(results) == 3)
+    check("performance dry-run numbers in order", [r.number for r in results] == [0, 1, 2])
+    check("performance dry-run flags silent (no monitor)", all(r.silent for r in results))
+    check("performance dry-run labels look like C000", results[0].label == "C000")
+
+    class ProgArgs(PerfArgs):
+        target = "program"
+        bank = "A"
+
+    results = sweep(DryRunMidiOut(), None, ProgArgs())
+    check("program dry-run labels look like A000", results[0].label == "A000")
+
+    class DrumArgs(PerfArgs):
+        target = "drum"
+        bank = "a"
+        note_start = 36
+        note_end = 38
+
+    results = sweep(DryRunMidiOut(), None, DrumArgs())
+    check("drum dry-run covers note_start..note_end inclusive", len(results) == 3)
+    check("drum dry-run notes in order", [r.number for r in results] == [36, 37, 38])
+    check("drum dry-run label includes note name", "C1" in results[0].label)
 
     return ok
 
@@ -197,20 +283,28 @@ def main():
     p.add_argument("--samplerate", type=int, default=48000)
     p.add_argument("--input-channels", type=int, nargs="+", default=[0, 1],
                     help="0-based audio input channel indices to monitor")
-    p.add_argument("--global-channel", type=int, required=False, default=1,
+    p.add_argument("--global-channel", type=int, default=1,
                     help="Supernova II's Global MIDI channel (1-16) — must match Global Menu page 1")
-    p.add_argument("--bank", choices=sorted(PERF_BANK_LSB), default="C", help="Performance bank to sweep")
-    p.add_argument("--start", type=int, default=0, help="first Performance number (0-127)")
-    p.add_argument("--end", type=int, default=127, help="last Performance number, inclusive (0-127)")
-    p.add_argument("--note-channels", type=int, nargs="+", default=list(range(1, 17)),
-                    help="MIDI channels to broadcast the test chord on (default: all 16)")
-    p.add_argument("--step", type=float, default=20.0, help="seconds allotted per Performance")
-    p.add_argument("--settle", type=float, default=0.5, help="seconds to wait after Program Change before the note")
-    p.add_argument("--note-hold", type=float, default=3.0, help="seconds the test chord is held")
-    p.add_argument("--chord", type=int, nargs="+", default=DEFAULT_CHORD, help="MIDI note numbers to trigger")
+    p.add_argument("--target", choices=["performance", "program", "drum"], default="performance",
+                    help="what to sweep: whole Performances, raw Programs, or one Drum Map's notes")
+    p.add_argument("--bank", default=None,
+                    help="bank letter for --target: A-D (performance), A-H (program), a-h (drum)")
+    p.add_argument("--start", type=int, default=0, help="[performance/program] first number (0-127)")
+    p.add_argument("--end", type=int, default=127, help="[performance/program] last number, inclusive (0-127)")
+    p.add_argument("--note-start", type=int, default=DRUM_NOTE_START, help="[drum] first MIDI note to test")
+    p.add_argument("--note-end", type=int, default=DRUM_NOTE_END, help="[drum] last MIDI note to test, inclusive")
+    p.add_argument("--note-channels", type=int, nargs="+", default=None,
+                    help="MIDI channels to trigger notes on (default: Global channel only, "
+                         "or all 16 for --target performance)")
+    p.add_argument("--step", type=float, default=None, help="seconds allotted per slot/note (default: 20 for "
+                                                              "performance/program, 2 for drum)")
+    p.add_argument("--settle", type=float, default=None, help="seconds to wait after selecting a slot before playing")
+    p.add_argument("--note-hold", type=float, default=None, help="seconds a note/chord is held")
+    p.add_argument("--chord", type=int, nargs="+", default=DEFAULT_CHORD,
+                    help="[performance/program] MIDI note numbers to trigger")
     p.add_argument("--velocity", type=int, default=100)
-    p.add_argument("--threshold", type=float, default=-50.0, help="rms dBFS below which a Performance is flagged silent")
-    p.add_argument("--out", default=None, help="CSV report path (default: perf_sweep_<bank>_<timestamp>.csv)")
+    p.add_argument("--threshold", type=float, default=-50.0, help="rms dBFS below which a slot is flagged silent")
+    p.add_argument("--out", default=None, help="CSV report path (default: sweep_<target>_<bank>_<timestamp>.csv)")
     p.add_argument("--dry-run", action="store_true", help="don't touch real MIDI/audio; useful to rehearse timing")
     args = p.parse_args()
 
@@ -235,8 +329,24 @@ def main():
             print("sounddevice not installed (pip install sounddevice)")
         return
 
-    if not (0 <= args.start <= args.end <= 127):
+    if args.bank is None:
+        p.error("--bank is required (unless using --selftest or --list-devices)")
+    if args.bank not in BANK_LSB[args.target]:
+        p.error(f"--bank {args.bank!r} isn't valid for --target {args.target}; "
+                f"choose from {sorted(BANK_LSB[args.target])}")
+    if args.target in ("performance", "program") and not (0 <= args.start <= args.end <= 127):
         p.error("--start/--end must satisfy 0 <= start <= end <= 127")
+    if args.target == "drum" and not (0 <= args.note_start <= args.note_end <= 127):
+        p.error("--note-start/--note-end must satisfy 0 <= note_start <= note_end <= 127")
+
+    if args.note_channels is None:
+        args.note_channels = list(range(1, 17)) if args.target == "performance" else [args.global_channel]
+    if args.step is None:
+        args.step = 20.0 if args.target in ("performance", "program") else 2.0
+    if args.settle is None:
+        args.settle = 0.5 if args.target == "performance" else (0.3 if args.target == "program" else 0.1)
+    if args.note_hold is None:
+        args.note_hold = 3.0 if args.target == "performance" else (2.0 if args.target == "program" else 0.4)
 
     midi: MidiOut
     monitor = None
@@ -256,17 +366,17 @@ def main():
         if monitor is not None:
             monitor.stop()
 
-    out_path = args.out or f"perf_sweep_{args.bank}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    out_path = args.out or f"sweep_{args.target}_{args.bank}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["bank", "performance", "peak_dbfs", "rms_dbfs", "silent", "timestamp"])
+        w.writerow(["target", "bank", "number", "label", "peak_dbfs", "rms_dbfs", "silent", "timestamp"])
         for r in results:
-            w.writerow([r.bank, r.performance, f"{r.peak_dbfs:.1f}", f"{r.rms_dbfs:.1f}", r.silent, r.timestamp])
+            w.writerow([r.target, r.bank, r.number, r.label, f"{r.peak_dbfs:.1f}", f"{r.rms_dbfs:.1f}", r.silent, r.timestamp])
 
     silent = [r for r in results if r.silent]
-    print(f"\nWrote {out_path} ({len(results)} performances tested, {len(silent)} flagged silent)")
+    print(f"\nWrote {out_path} ({len(results)} tested, {len(silent)} flagged silent)")
     for r in silent:
-        print(f"  SILENT: {r.bank}{r.performance:03d}")
+        print(f"  SILENT: {r.label}")
 
 
 if __name__ == "__main__":
