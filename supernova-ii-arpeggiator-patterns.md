@@ -133,3 +133,113 @@ whatever you've built in `U`/`V`.
 - Multiple arpeggiators (up to 8, one per Performance Part) can run different
   patterns/time signatures at once, but they all share one master clock — the
   Speed knob affects every running arpeggiator together.
+
+## Building a Performance with 8 different arpeggiators
+
+A Performance is 8 Parts, each a full copy of a Program (own Oscillators,
+Filter, Effects **and** Arpeggiator, p.28). To get 8 independently-arpeggiated
+Parts:
+
+1. Press **Performance**, pick a Performance to start from/overwrite (or an
+   empty slot), e.g. the factory `Multi Ch 1-8` template (Perf A126) which
+   already has each Part on its own MIDI channel — a good base for layering
+   or multitimbral use.
+2. For **each of the 8 Parts** (press the **Part 1**…**Part 8** button):
+   - Assign a Program with **Bank + keypad/Prog Up-Down** (pick any patch —
+     see "Changing patches" below).
+   - Turn that Part's **Arp On/Off** on (front panel, applies to the
+     currently-selected Part).
+   - Press **Special** (Part Edit section) → page 1 → set **"Arp bank &
+     pattern used"** to `Part`. This is the key step: it lets this Part use
+     its *own* pattern choice instead of whatever pattern is baked into the
+     Program, so you don't need 8 separate Programs just to get 8 different
+     patterns (p.140).
+   - Press **Arp Menu** → page 1 → set **Pattern Bank**/**Pattern no.** to a
+     *different* value for each Part — e.g. Part 1 = `Mono 000`, Part 2 =
+     `Mono 037`, Part 3 = `Poly 071`, Part 4 = one of your own `User(U/V/W)`
+     patterns from the earlier steps in this doc, etc. Since there are 128
+     factory Mono + 128 factory Poly + up to 384 user patterns to draw from,
+     "random" in practice means: pick 8 numbers without thinking too hard, or
+     literally roll dice / use a random number generator to choose bank +
+     pattern number for each Part.
+   - Optionally vary **Sync** (Arp Menu page 5) per Part so they interlock at
+     different subdivisions instead of all ticking in lockstep — they still
+     share one master clock/Speed (p.28), so this is where the polyrhythmic
+     variation comes from, not from independent tempos.
+   - Optionally set **Range** (Part Edit section) per Part if you want a
+     keyboard split/layer rather than all 8 stacked on the same notes.
+3. Press **Write**, choose the destination Performance slot, name it, and
+   confirm. Since writing is destructive (p.43), pick a free slot if you want
+   to keep whatever Performance was there before.
+
+Result: playing a chord (or holding notes across the whole keyboard, if
+Ranges overlap) triggers up to 8 simultaneous, differently-patterned
+arpeggios — a good starting point for generative/evolving textures.
+
+## Changing which patches (Programs) a Performance uses
+
+Yes — each Part's Program assignment is fully editable, independently of the
+other Parts, without leaving Performance mode:
+
+1. Press **Performance**, select the Performance.
+2. Press the **Part** button for the Part whose patch you want to change
+   (e.g. **Part 3**). The display switches to show that Part's currently
+   assigned Program.
+3. Use the **Bank** button + **keypad** (or Prog Up/Down) to pick a different
+   Program from any of the Program banks (or a Drum Map) — this replaces the
+   patch used by that Part only; the other 7 Parts are untouched (p.41).
+4. Repeat for any other Parts you want to repatch.
+5. Press **Write** to save the change into the Performance. You'll be asked
+   `Update progs? No/Yes/Each` — leave this at `No` unless you specifically
+   want to also overwrite the underlying Program memories with any knob
+   tweaks you made while auditioning (p.44); `No` just saves which
+   Program-slot each Part points to.
+
+Note: switching a Part's Program also reloads that Program's own Arpeggiator
+pattern/settings into the Part *unless* you've set "Arp bank & pattern used"
+to `Part` for that Part (see above) — with that set, your Performance-level
+pattern choice survives a patch change instead of being overwritten by the
+new Program's default pattern.
+
+## Testing that a patch is actually producing sound via USB into the Mac mini
+
+I don't have physical access to your Supernova II or your Mac mini from this
+session, so I can't run this test for you — but here's the checklist to
+verify it yourself:
+
+**Signal path**: the Supernova II Keyboard has no built-in USB audio output —
+its outputs are analog (1/4" jacks, 8 outputs in 4 stereo pairs, p.135). So
+"feeding it back via USB" means it's going: Supernova II analog out → cable →
+a **USB audio interface** → USB → Mac mini. Confirm which interface is in the
+chain before debugging further.
+
+1. **Check the Supernova II side**
+   - Confirm the Part(s) you're testing are set to **Part outputs 1 & 2**
+     (Output button, p.135) unless you've deliberately routed them elsewhere
+     — outputs 3–8 need separate cables into the interface too.
+   - Play/trigger the arpeggiator and watch the Supernova II's own output
+     level (if it has meters) or just confirm the Program isn't muted/soloed
+     to a different Part (Mute/Solo buttons, p.42).
+2. **Check the cabling** — Supernova II output 1 (L) and 2 (R) into the
+   correct **input** channels 1/2 on the USB interface, not an output.
+3. **On the Mac mini**:
+   - Open **Audio MIDI Setup** (Applications → Utilities). Confirm the USB
+     interface is listed and its input channels show activity (small level
+     meters) when you play a note on the Supernova II.
+   - Or: **System Settings → Sound → Input**, select the interface, and watch
+     the input level bar while playing.
+   - Or, to actually hear it: open **QuickTime Player → File → New Audio
+     Recording**, click the dropdown arrow next to the record button, select
+     the interface as the input source, and you'll hear/see the input live
+     without needing to actually record.
+   - In a DAW (Logic/GarageBand/Ableton), create an audio track, set its input
+     to the interface's channel(s), and enable input monitoring.
+4. **No signal?** Common culprits: interface's input gain/trim turned down,
+   wrong input channel selected in the app vs. which physical jack you used,
+   a TRS/TS cable mismatch, the interface set to a different sample rate than
+   expected, or macOS's selected **input device** not matching the interface
+   at all (another device, e.g. the Mac's built-in mic, may be selected
+   instead).
+
+If you tell me the specific USB audio interface model, I can give exact menu
+names for its control panel/driver, if it has one.
