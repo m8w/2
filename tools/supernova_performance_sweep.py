@@ -33,6 +33,16 @@ Examples:
         --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \\
         --global-channel 16
 
+    python3 supernova_performance_sweep.py --target program --bank ALL \\
+        --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \\
+        --global-channel 16
+
+--bank also accepts a comma-separated list (e.g. --bank A,B,C) or the
+keyword ALL (every valid bank letter for --target) to sweep multiple banks
+in one run. Every run writes both a full CSV and a plain-text "dead list"
+(one label per line, e.g. A017) of everything flagged silent — that list is
+what you keep to steer Performance Parts away from.
+
     python3 supernova_performance_sweep.py --target drum --bank a \\
         --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \\
         --global-channel 16
@@ -166,11 +176,11 @@ def _measure_and_log(midi, monitor, args, note_time, notes_held, target, bank, n
     return result
 
 
-def sweep_performance_or_program(midi: MidiOut, monitor, args) -> list[Result]:
+def sweep_performance_or_program(midi: MidiOut, monitor, args, bank: str) -> list[Result]:
     results: list[Result] = []
     for number in range(args.start, args.end + 1):
         t0 = time.time()
-        midi.select_slot(args.global_channel, args.target, args.bank, number)
+        midi.select_slot(args.global_channel, args.target, bank, number)
         time.sleep(args.settle)
 
         note_time = time.time()
@@ -178,16 +188,16 @@ def sweep_performance_or_program(midi: MidiOut, monitor, args) -> list[Result]:
         time.sleep(args.note_hold)
         midi.note_off(args.note_channels, args.chord)
 
-        label = f"{args.bank}{number:03d}"
-        results.append(_measure_and_log(midi, monitor, args, note_time, args.chord, args.target, args.bank, number, label))
+        label = f"{bank}{number:03d}"
+        results.append(_measure_and_log(midi, monitor, args, note_time, args.chord, args.target, bank, number, label))
 
         elapsed = time.time() - t0
         time.sleep(max(0.0, args.step - elapsed))
     return results
 
 
-def sweep_drum(midi: MidiOut, monitor, args) -> list[Result]:
-    midi.select_slot(args.global_channel, "drum", args.bank, 0)
+def sweep_drum(midi: MidiOut, monitor, args, bank: str) -> list[Result]:
+    midi.select_slot(args.global_channel, "drum", bank, 0)
     time.sleep(args.settle)
 
     results: list[Result] = []
@@ -198,18 +208,36 @@ def sweep_drum(midi: MidiOut, monitor, args) -> list[Result]:
         time.sleep(args.note_hold)
         midi.note_off(args.note_channels, [note])
 
-        label = f"{args.bank} {note_name(note)} (note {note})"
-        results.append(_measure_and_log(midi, monitor, args, note_time, [note], "drum", args.bank, note, label))
+        label = f"{bank} {note_name(note)} (note {note})"
+        results.append(_measure_and_log(midi, monitor, args, note_time, [note], "drum", bank, note, label))
 
         elapsed = time.time() - t0
         time.sleep(max(0.0, args.step - elapsed))
     return results
 
 
+def resolve_banks(target: str, bank_arg: str) -> list[str]:
+    valid = BANK_LSB[target]
+    if bank_arg.upper() == "ALL":
+        return sorted(valid)
+    banks = [b.strip() for b in bank_arg.split(",") if b.strip()]
+    unknown = [b for b in banks if b not in valid]
+    if unknown:
+        raise ValueError(f"bank(s) {unknown} aren't valid for --target {target}; choose from {sorted(valid)}")
+    return banks
+
+
 def sweep(midi: MidiOut, monitor, args) -> list[Result]:
-    if args.target == "drum":
-        return sweep_drum(midi, monitor, args)
-    return sweep_performance_or_program(midi, monitor, args)
+    banks = resolve_banks(args.target, args.bank)
+    results: list[Result] = []
+    for i, bank in enumerate(banks):
+        if len(banks) > 1:
+            print(f"\n=== bank {bank} ({i + 1}/{len(banks)}) ===")
+        if args.target == "drum":
+            results.extend(sweep_drum(midi, monitor, args, bank))
+        else:
+            results.extend(sweep_performance_or_program(midi, monitor, args, bank))
+    return results
 
 
 def run_selftest() -> bool:
@@ -271,6 +299,23 @@ def run_selftest() -> bool:
     check("drum dry-run notes in order", [r.number for r in results] == [36, 37, 38])
     check("drum dry-run label includes note name", "C1" in results[0].label)
 
+    check("resolve_banks single letter", resolve_banks("program", "A") == ["A"])
+    check("resolve_banks comma list preserves order", resolve_banks("program", "C,A,B") == ["C", "A", "B"])
+    check("resolve_banks ALL is every program bank sorted", resolve_banks("program", "ALL") == list("ABCDEFGH"))
+    check("resolve_banks ALL is every drum bank sorted", resolve_banks("drum", "all") == list("abcdefgh"))
+    try:
+        resolve_banks("program", "Z")
+        check("resolve_banks rejects unknown bank", False)
+    except ValueError:
+        check("resolve_banks rejects unknown bank", True)
+
+    class MultiBankArgs(ProgArgs):
+        bank = "A,B"
+
+    results = sweep(DryRunMidiOut(), None, MultiBankArgs())
+    check("multi-bank dry-run covers both banks", len(results) == 6)
+    check("multi-bank dry-run labels span A and B", results[0].label == "A000" and results[3].label == "B000")
+
     return ok
 
 
@@ -288,7 +333,8 @@ def main():
     p.add_argument("--target", choices=["performance", "program", "drum"], default="performance",
                     help="what to sweep: whole Performances, raw Programs, or one Drum Map's notes")
     p.add_argument("--bank", default=None,
-                    help="bank letter for --target: A-D (performance), A-H (program), a-h (drum)")
+                    help="bank letter(s) for --target: A-D (performance), A-H (program), a-h (drum); "
+                         "comma-separated list or ALL to sweep multiple banks in one run")
     p.add_argument("--start", type=int, default=0, help="[performance/program] first number (0-127)")
     p.add_argument("--end", type=int, default=127, help="[performance/program] last number, inclusive (0-127)")
     p.add_argument("--note-start", type=int, default=DRUM_NOTE_START, help="[drum] first MIDI note to test")
@@ -330,10 +376,12 @@ def main():
         return
 
     if args.bank is None:
-        p.error("--bank is required (unless using --selftest or --list-devices)")
-    if args.bank not in BANK_LSB[args.target]:
-        p.error(f"--bank {args.bank!r} isn't valid for --target {args.target}; "
-                f"choose from {sorted(BANK_LSB[args.target])}")
+        p.error("--bank is required (unless using --selftest or --list-devices); "
+                "accepts a single letter, a comma-separated list, or ALL")
+    try:
+        banks = resolve_banks(args.target, args.bank)
+    except ValueError as e:
+        p.error(str(e))
     if args.target in ("performance", "program") and not (0 <= args.start <= args.end <= 127):
         p.error("--start/--end must satisfy 0 <= start <= end <= 127")
     if args.target == "drum" and not (0 <= args.note_start <= args.note_end <= 127):
@@ -347,6 +395,11 @@ def main():
         args.settle = 0.5 if args.target == "performance" else (0.3 if args.target == "program" else 0.1)
     if args.note_hold is None:
         args.note_hold = 3.0 if args.target == "performance" else (2.0 if args.target == "program" else 0.4)
+
+    slots_per_bank = (args.end - args.start + 1) if args.target != "drum" else (args.note_end - args.note_start + 1)
+    total_seconds = slots_per_bank * len(banks) * args.step
+    print(f"Sweeping {len(banks)} bank(s) ({', '.join(banks)}), "
+          f"{slots_per_bank} slot(s) each, ~{total_seconds / 60:.1f} min total.")
 
     midi: MidiOut
     monitor = None
@@ -366,7 +419,8 @@ def main():
         if monitor is not None:
             monitor.stop()
 
-    out_path = args.out or f"sweep_{args.target}_{args.bank}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    bank_tag = "-".join(banks) if len(banks) <= 8 else f"{banks[0]}-{banks[-1]}"
+    out_path = args.out or f"sweep_{args.target}_{bank_tag}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["target", "bank", "number", "label", "peak_dbfs", "rms_dbfs", "silent", "timestamp"])
@@ -374,7 +428,13 @@ def main():
             w.writerow([r.target, r.bank, r.number, r.label, f"{r.peak_dbfs:.1f}", f"{r.rms_dbfs:.1f}", r.silent, r.timestamp])
 
     silent = [r for r in results if r.silent]
+    dead_list_path = out_path.rsplit(".", 1)[0] + "_dead.txt"
+    with open(dead_list_path, "w") as f:
+        for r in silent:
+            f.write(r.label + "\n")
+
     print(f"\nWrote {out_path} ({len(results)} tested, {len(silent)} flagged silent)")
+    print(f"Wrote {dead_list_path} — steer Performance Parts away from these:")
     for r in silent:
         print(f"  SILENT: {r.label}")
 

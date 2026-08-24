@@ -304,23 +304,36 @@ python3 tools/supernova_performance_sweep.py --target performance --bank C \
     --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
     --global-channel 16
 
-python3 tools/supernova_performance_sweep.py --target program --bank A \
+python3 tools/supernova_performance_sweep.py --target program --bank ALL \
     --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
     --global-channel 16
 
-python3 tools/supernova_performance_sweep.py --target drum --bank a \
+python3 tools/supernova_performance_sweep.py --target drum --bank ALL \
     --midi-port "microKORG XL MIDI OUT" --audio-device "USB Audio CODEC" \
     --global-channel 16
 ```
 
+`--bank` accepts a single letter, a comma-separated list (`--bank A,B,C`), or
+`ALL` (every valid bank for that `--target`) — so the `program --bank ALL`
+run above sweeps all 1024 Programs (`A000`-`H127`) in one sitting instead of
+8 separate invocations.
+
 Rough timing at the defaults: Performances/Programs are 20s/slot (128 slots
-≈ 43 minutes per bank — 8 Program banks ≈ 5.7 hours if you sweep all of
-`A`-`H`); Drum Maps are 2s/note (48 notes ≈ 96 seconds per map, all 8 maps
-≈ 13 minutes). Narrow any run with `--start`/`--end` (performance/program)
-or `--note-start`/`--note-end` (drum) to re-check just a range after fixing
-something. Output is `sweep_<target>_<bank>_<timestamp>.csv`
-(`target, bank, number, label, peak_dbfs, rms_dbfs, silent, timestamp`) plus
-a printed summary of every `SILENT` entry.
+≈ 43 minutes per bank — all 8 Program banks in one `--bank ALL` run ≈ 5.7
+hours); Drum Maps are 2s/note (48 notes ≈ 96 seconds per map, all 8 maps
+≈ 13 minutes). That's long enough you'll likely want to split it across a
+few sittings — narrow any run with `--start`/`--end` (performance/program)
+or `--note-start`/`--note-end` (drum), or just pass a subset of banks
+(`--bank A,B,C`) per sitting.
+
+Every run writes two files: `sweep_<target>_<banks>_<timestamp>.csv` (full
+detail — `target, bank, number, label, peak_dbfs, rms_dbfs, silent,
+timestamp`) and `..._dead.txt` (just the labels flagged silent, one per
+line, e.g. `A017`) — that second file is your running "steer clear of
+these" list for reprogramming Performance Parts. Re-running later (e.g.
+after narrowing with `--start`/`--end` to double-check a few) overwrites
+that run's own files; if you want one master list across multiple sittings,
+just `cat` the `_dead.txt` files together and dedupe.
 
 **Caveats these scripts can't remove**:
 - *Performance* sweep: broadcasting across all 16 channels only proves
