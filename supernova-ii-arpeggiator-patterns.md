@@ -244,25 +244,112 @@ chain before debugging further.
 If you tell me the specific USB audio interface model, I can give exact menu
 names for its control panel/driver, if it has one.
 
-## Automated sweep: testing every patch in a library for silent output
+## Automated sweep: testing every patch/Performance in a library for silence
 
-Manually stepping through every Program by hand (128 per bank × up to 8
-banks) and listening for silence doesn't scale. `tools/supernova_patch_sweep.py`
-automates it: on one or more MIDI channels ("lanes"), it steps through a
-Program bank one number at a time, triggers a chord, records the audio
-arriving on that lane's assigned interface input channel(s), and flags any
-program whose recorded level never rises above a silence threshold.
+Manually stepping through every slot by hand and listening for silence
+doesn't scale — a Performance bank alone is 128 slots. Two scripts under
+`tools/` automate this; which one you want depends on what you're actually
+sweeping:
 
-This matches the "channel 1 changes patch, channel 2 changes a patch ~20s
-later, keep going, for every program in the library" idea directly: each
-`--lane` is one MIDI channel/Performance Part, `--stagger` offsets when each
-lane starts (so their very first note-onsets don't land on top of each
-other), and `--step` is the ~20s given to each program before moving to the
-next.
+- **`supernova_performance_sweep.py`** — sweeps whole **Performances**
+  (e.g. `C000`–`C127`). This is the one for "some patches in my C000-C127
+  library are silent, find out which." A Performance change is a single
+  Bank Select + Program Change on the **Global MIDI channel only** and
+  swaps all 8 Parts of the unit at once — there's no way to parallelize
+  this across lanes, so it's a straightforward sequential loop.
+- **`supernova_patch_sweep.py`** — sweeps individual **Programs** within a
+  Program bank (`A`-`H`), independently per MIDI channel/Part, optionally
+  in parallel "lanes". Use this if you're instead auditioning raw Programs
+  (not whole Performances) across multiple Parts at once.
 
-### One-time setup on the Supernova II
+Both flag anything whose recorded audio never rises above a silence
+threshold, and write a CSV report.
 
-1. Load Performance **C000** (or whichever Performance you're testing from).
+> **Correction**: an earlier version of this doc/script had the Program
+> Bank Select values off by one (used `A=4..H=11`; the manual's own "BANK
+> MESSAGES" table gives `A=5..H=12`, since LSB values 1-4 are Performance
+> banks A-D and Program banks start at 5). Fixed in both scripts — the
+> shared `BANK_LSB`/`PERF_BANK_LSB` tables are now sourced directly from
+> that table (p.166) and checked by `--selftest`.
+
+### Sweeping Performances (`C000`-`C127`) — your current case
+
+Since your Logic session already shows the 8 Parts are static and only the
+Performance selection changes, this is a single-channel, single-threaded
+sweep: select Performance `N`, broadcast a wide test chord across every
+MIDI channel (so it doesn't matter which channel any given Part happens to
+listen on), measure, move to the next `N`.
+
+Setup: note your Supernova II's **Global MIDI channel** (Global Menu page 1)
+— Performance Bank Select/Program Change is only recognised there.
+
+```bash
+pip install mido python-rtmidi sounddevice numpy
+
+# find exact MIDI/audio device names — you already confirmed the audio
+# interface is "USB Audio CODEC" from Logic's track inspector
+python3 tools/supernova_performance_sweep.py --list-devices
+
+# offline check of the script's own logic, no hardware needed
+python3 tools/supernova_performance_sweep.py --selftest
+
+# rehearse timing without touching real MIDI/audio
+python3 tools/supernova_performance_sweep.py --dry-run --bank C --step 1
+
+# the real run: Performance bank C, all 128 slots, 20s each
+python3 tools/supernova_performance_sweep.py \
+    --midi-port "Supernova" --audio-device "USB Audio CODEC" \
+    --global-channel 1 --bank C --step 20
+```
+
+That's ~128 × 20s ≈ 43 minutes for the full bank. Narrow it with `--start`/
+`--end` to re-check just a range (e.g. re-testing after fixing a few slots).
+Output is `perf_sweep_C_<timestamp>.csv` (`bank, performance, peak_dbfs,
+rms_dbfs, silent, timestamp`) plus a printed summary of every `SILENT`
+Performance number — that list is what you actually go fix (see below).
+
+**Caveat this script can't remove**: broadcasting the chord across all 16
+channels only proves *something* on some Part responded. If a Part's
+**Range** doesn't include any of the chord notes (`--chord` defaults to a
+3-octave spread specifically to reduce this), that Part alone would look
+silent even if it's fine — the flag is on the whole Performance, not a
+specific Part. Treat `SILENT` results as "go look at this one," not
+automatically "this patch is broken."
+
+### Fixing a Performance flagged silent
+
+Once you have the list of silent `C0xx` numbers, the usual causes (from the
+Performance/Part Edit sections of the manual) to check on each, in
+Performance mode:
+
+- **Polyphony = Off** for the Part (Polyphony menu) — this is the
+  "no Program assigned" state (p.42).
+- **Part Muted** — mute state is saved with the Performance (p.42); press
+  Mute then the Part button to check/clear it.
+- **Part Volume** at/near 0, or **Output** routed to a pair (3-8) you're
+  not monitoring (Output menu, p.135).
+- **Range** excludes every note you're testing with.
+- **MIDI channel** for the Part set to something other than what's actually
+  being played into it (only matters if you're triggering on a single
+  channel rather than this script's broadcast-to-all-16 approach).
+- The Program assigned to that Part is itself genuinely silent (e.g. all
+  Oscillator mix levels at 0) — rebuild or replace it.
+
+### Sweeping raw Programs (`A000`-`H127`), independently per Part
+
+If instead you want to audition individual Programs (not whole
+Performances) — e.g. building fresh Parts for a new Performance and
+checking each candidate patch makes sound before assigning it — use
+`supernova_patch_sweep.py`. This one *can* run multiple MIDI channels/Parts
+in parallel ("lanes"), since each Part's own Program can be changed
+independently without affecting the rest of the unit. It matches the
+original "channel 1 changes patch, channel 2 changes a patch ~20s later,
+keep going" idea when the thing changing per-channel is the raw Program,
+not the whole Performance.
+
+#### One-time setup on the Supernova II
+
+1. Load whichever Performance you're testing Parts from.
 2. Set the **Global MIDI channel** (Global Menu page 1) to a channel none of
    your test lanes will use, e.g. `16`.
 3. For each Part you're going to sweep (e.g. Part 1, Part 2): press its Part
@@ -276,38 +363,27 @@ next.
    pair into separate input channels on your USB interface. Running one lane
    at a time on a shared stereo bus needs none of this.
 
-### Running it
+#### Running it
 
 ```bash
-pip install mido python-rtmidi sounddevice numpy
-
-# find your exact MIDI/audio device names first
 python3 tools/supernova_patch_sweep.py --list-devices
-
-# offline check of the script's own logic, no hardware needed
 python3 tools/supernova_patch_sweep.py --selftest
-
-# rehearse timing without touching real MIDI/audio
 python3 tools/supernova_patch_sweep.py --dry-run --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D
 
-# the real run: channel 1 -> interface inputs 0/1, channel 2 -> inputs 2/3,
-# sweep Program banks A-D on both, 20s per program, channel 2 starts 20s
-# after channel 1
+# channel 1 -> interface inputs 0/1, channel 2 -> inputs 2/3, sweep Program
+# banks A-D on both, 20s per program, channel 2 starts 20s after channel 1
 python3 tools/supernova_patch_sweep.py \
-    --midi-port "Supernova" --audio-device "Scarlett" \
+    --midi-port "Supernova" --audio-device "USB Audio CODEC" \
     --lane 1:0,1:A,B,C,D --lane 2:2,3:A,B,C,D \
     --stagger 20 --step 20
 ```
 
-Each run writes a timestamped CSV (`lane, channel, bank, program, peak_dbfs,
-rms_dbfs, silent, timestamp`) and prints a live line per program plus a final
-summary of everything flagged `SILENT`. Tune `--threshold` (default -50 dBFS
-RMS) if your interface's noise floor makes that too sensitive or not
-sensitive enough, and `--chord`/`--velocity`/`--note-hold` if a patch needs a
-different trigger to speak (e.g. a higher velocity to clear a velocity
-switch, or a longer hold for a slow attack).
+Both scripts share `tools/sn2_audio.py` for the audio-capture/dBFS logic —
+`--selftest` on either exercises that shared code too.
 
-I can't run this against your actual Supernova II / interface from here — I
-verified the script's own logic (ring-buffer timing, dBFS math, CLI parsing,
-multi-lane scheduling) with `--selftest` and `--dry-run`, but the real
-proof is a live run on your hardware.
+I can't run either script against your actual Supernova II / interface from
+this session — I verified the pure logic (ring-buffer timing, dBFS math,
+Bank Select LSB values against the manual's table, CLI parsing, sweep
+scheduling) with `--selftest` and `--dry-run`, catching and fixing the
+off-by-one bank bug along the way, but the real proof is a live run on your
+hardware.
