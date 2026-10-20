@@ -242,22 +242,63 @@ def random_font(rng, pool, title, mode, lo_n, hi_n):
 
 # --------------------------------------------------------------------- main --
 
+def ask(prompt, default=""):
+    try:
+        ans = input(f"{prompt}{f' [{default}]' if default != '' else ''}: ").strip()
+    except EOFError:
+        sys.exit()
+    return ans or str(default)
+
+
+def ask_range(prompt, default, limit):
+    """'5' -> (5, 5); '3-8' -> (3, 8); clamped to 1..limit."""
+    while True:
+        txt = ask(prompt, default).replace(" ", "")
+        try:
+            lo, _, hi = txt.partition("-")
+            lo, hi = int(lo), int(hi or lo)
+            return max(1, min(lo, hi, limit)), max(1, min(max(lo, hi), limit))
+        except ValueError:
+            print("  please type a number like 5, or a range like 3-8")
+
+
+def find_wavs(paths):
+    files = []
+    for p in paths:
+        if p.is_dir():
+            files += [f for f in sorted(p.rglob("*")) if f.suffix.lower() == ".wav"
+                      and not f.name.startswith(".")]
+        else:
+            files.append(p)
+    return files
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("inputs", nargs="+", help=".wav files and/or folders of them")
-    ap.add_argument("-o", "--out", default="fonts", help="output folder (default: fonts)")
-    ap.add_argument("-n", "--count", type=int, default=1, help="how many fonts to make")
+    ap.add_argument("inputs", nargs="*", help=".wav files and/or folders (omit to be asked)")
+    ap.add_argument("-o", "--out", help="output folder (default: 'SoundFonts' inside the wav folder)")
+    ap.add_argument("-n", "--count", type=int, help="how many fonts to make")
     ap.add_argument("--mode", choices=MODES, help="keyboard layout (default: random per font)")
-    ap.add_argument("--min-samples", type=int, default=3)
-    ap.add_argument("--max-samples", type=int, default=12)
+    ap.add_argument("--min-samples", type=int, help="fewest wavs per font")
+    ap.add_argument("--max-samples", type=int, help="most wavs per font")
     ap.add_argument("--max-seconds", type=float, default=20, help="trim each wav to this length")
     ap.add_argument("--seed", type=int, help="seed for reproducible output")
     args = ap.parse_args()
+    interactive = not args.inputs
 
+    if interactive:
+        print("Random SoundFont maker\n")
+        while True:
+            # drag-and-drop in Terminal pastes a path with backslash escapes / quotes
+            txt = ask("Folder with your wav files (drag it here)", ".").strip("'\"")
+            folder = Path(txt.replace("\\ ", " ")).expanduser()
+            if folder.is_dir() and find_wavs([folder]):
+                break
+            print("  no wav files found there, try again")
+        args.inputs = [str(folder)]
     rng = random.Random(args.seed)
-    files = []
-    for p in map(Path, args.inputs):
-        files += sorted(p.rglob("*.wav")) + sorted(p.rglob("*.WAV")) if p.is_dir() else [p]
+    files = find_wavs(map(Path, args.inputs))
+
     pool = []
     for f in files:
         try:
@@ -266,16 +307,30 @@ def main():
             print(f"skip {f}: {e}", file=sys.stderr)
     if not pool:
         sys.exit("no usable wav files")
+    print(f"Found {len(pool)} usable wav files.")
 
-    out = Path(args.out)
+    if interactive:
+        lo_n, hi_n = ask_range("How many wavs per font? (a number like 5, or a range like 3-8)",
+                               f"3-{min(12, len(pool))}", len(pool))
+        args.count = ask_range("How many fonts to make?", 1, 999)[0]
+        mode = ask("Layout: split / layer / drum / random", "random").lower()
+        args.mode = mode if mode in MODES else None
+    else:
+        lo_n = args.min_samples or 3
+        hi_n = args.max_samples or max(lo_n, 12)
+        args.count = args.count or 1
+        lo_n = max(1, min(lo_n, hi_n))
+
+    first = Path(args.inputs[0])
+    out = Path(args.out) if args.out else (first if first.is_dir() else first.parent) / "SoundFonts"
     out.mkdir(parents=True, exist_ok=True)
-    lo_n = max(1, min(args.min_samples, args.max_samples))
-    for i in range(args.count):
+    for _ in range(args.count):
         title = f"Random{rng.randrange(10**4):04d}"
-        blob, mode, character, names = random_font(rng, pool, title, args.mode, lo_n, max(lo_n, args.max_samples))
+        blob, mode, character, names = random_font(rng, pool, title, args.mode, lo_n, hi_n)
         path = out / f"{title}.sf2"
         path.write_bytes(blob)
-        print(f"{path}  {mode}/{character}  {len(names)} samples: {', '.join(names)}")
+        print(f"{path.name}  {mode}/{character}  {len(names)} samples: {', '.join(names)}")
+    print(f"\nDone. Fonts are in: {out}")
 
 
 if __name__ == "__main__":
