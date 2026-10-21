@@ -218,14 +218,15 @@ def build_sf2(title, samples, zones):
     return chunk(b"RIFF", b"sfbk" + info + sdta + pdta)
 
 
-def random_font(rng, pool, title, mode, lo_n, hi_n):
+def random_font(rng, pool, title, mode, lo_n, hi_n, picks=None):
+    """Build one font. `picks` (pool entries) re-uses given wavs; otherwise a random subset."""
     mode = mode or rng.choice(MODES)
-    cap = {"layer": 126, "drum": 92}.get(mode, 100)
-    n = min(len(pool), cap, rng.randint(lo_n, hi_n))
-    picks = rng.sample(pool, n)
+    if picks is None:
+        cap = {"layer": 126, "drum": 92}.get(mode, 100)
+        picks = rng.sample(pool, min(len(pool), cap, rng.randint(lo_n, hi_n)))
     character = rng.choice(list(CHARACTERS))
-    slots = layout(rng, mode, n)
-    samples, zones = [], []
+    slots = layout(rng, mode, len(picks))
+    samples, zones, info = [], [], []
     for i, ((path, data, rate), (klo, khi, vlo, vhi, root)) in enumerate(zip(picks, slots)):
         loop = None if mode == "drum" else pick_loop(rng, data)
         samples.append((Path(path).stem, data, rate, root, loop))
@@ -237,7 +238,72 @@ def random_font(rng, pool, title, mode, lo_n, hi_n):
             gens.append((G_ATTEN, rng.randint(0, 120)))
         gens.append((G_SAMPLEID, i))
         zones.append(gens)
-    return build_sf2(title, samples, zones), mode, character, [Path(p).name for p, _, _ in picks]
+        info.append(dict(path=Path(path), data=data, rate=rate, keys=(klo, khi), vel=(vlo, vhi),
+                         root=root, loop=loop, gens={g[0]: g[1] for g in gens}))
+    return dict(blob=build_sf2(title, samples, zones), title=title, mode=mode,
+                character=character, picks=picks, zones=info)
+
+
+def write_details(path, font):
+    lines = [f"Name: {font['title']}", f"Layout: {font['mode']}", f"Character: {font['character']}", ""]
+    for i, z in enumerate(font["zones"], 1):
+        lines.append(f"Zone {i}: {z['path'].name}  keys {z['keys'][0]}-{z['keys'][1]} "
+                     f"(root {z['root']})  velocity {z['vel'][0]}-{z['vel'][1]}  "
+                     f"{'looped' if z['gens'].get(G_SAMPLEMODES) else 'one-shot'}")
+    lines += ["", "Source wavs (used by --reroll):"] + [f"wav: {z['path'].resolve()}" for z in font["zones"]]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def render_preview(font, path, rate=44100):
+    """Rough audition of a font: one note per zone, mixed to a stereo wav.
+    Applies pitch, pan and the volume envelope only (no filter, vibrato or reverb)."""
+    events = []
+    for z in sorted(font["zones"], key=lambda z: z["keys"]):
+        key = (z["keys"][0] + z["keys"][1]) // 2 if font["mode"] != "layer" else 60
+        events.append((key, (z["vel"][0] + z["vel"][1]) // 2, z))
+    step, hold, tail = 0.55, 0.5, 1.5
+    total = int((step * len(events) + hold + tail) * rate)
+    left, right = [0.0] * total, [0.0] * total
+    for n, (key, vel, z) in enumerate(events):
+        g, data = z["gens"], z["data"]
+        ratio = 2 ** ((key - z["root"]) / 12 + g.get(G_FINE, 0) / 1200) * z["rate"] / rate
+        sec = lambda op, d: 2 ** (g.get(op, d) / 1200)
+        att, dec, rel = sec(G_ATTACK, -12000), sec(G_DECAY, -12000), sec(G_RELEASE, -12000)
+        sus = 10 ** (-g.get(G_SUSTAIN, 0) / 200)
+        looped = z["loop"] if g.get(G_SAMPLEMODES) else None
+        pan = (g.get(G_PAN, 0) / 500 + 1) / 2
+        lg, rg = math.cos(pan * math.pi / 2), math.sin(pan * math.pi / 2)
+        amp = (vel / 127) ** 2 * 10 ** (-g.get(G_ATTEN, 0) / 200) * 0.5
+        start, pos, t, last, rel_level = int(n * step * rate), 0.0, 0.0, len(data) - 1, None
+        for i in range(start, min(total, start + int((hold + min(rel, 2.0)) * rate))):
+            if looped and pos >= looped[1]:
+                pos -= looped[1] - looped[0]
+            if pos >= last:
+                break
+            if t < hold:
+                env = t / att if t < att else (1 - (1 - sus) * min(1, (t - att) / dec))
+                rel_level = env
+            else:
+                env = rel_level * max(0.0, 1 - (t - hold) / rel)
+            j = int(pos)
+            v = (data[j] + (data[j + 1] - data[j]) * (pos - j)) / 32768 * env * amp
+            left[i] += v * lg
+            right[i] += v * rg
+            pos += ratio
+            t += 1 / rate
+    peak = max(1e-9, max(map(abs, left + right)))
+    scale = 0.9 * 32767 / peak if peak > 0.9 else 32767
+    frames = array.array("h")
+    for l, r in zip(left, right):
+        frames.append(int(l * scale))
+        frames.append(int(r * scale))
+    if sys.byteorder == "big":
+        frames.byteswap()
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(frames.tobytes())
 
 
 # --------------------------------------------------------------------- main --
@@ -273,19 +339,62 @@ def find_wavs(paths):
     return files
 
 
+def safe_name(title):
+    return "".join(c if c.isalnum() or c in " -_" else "_" for c in title).strip() or "font"
+
+
+def save_font(font, out, preview):
+    stem = safe_name(font["title"])
+    (out / f"{stem}.sf2").write_bytes(font["blob"])
+    write_details(out / f"{stem}.txt", font)
+    if preview:
+        render_preview(font, out / f"{stem}_preview.wav")
+    print(f"{stem}.sf2  {font['mode']}/{font['character']}  {len(font['picks'])} samples: "
+          f"{', '.join(p[0].name for p in font['picks'])}")
+
+
+def reroll_picks(details, pool_by_path, max_seconds):
+    picks = []
+    for line in details.read_text().splitlines():
+        if line.startswith("wav: "):
+            p = Path(line[5:])
+            if p not in pool_by_path:
+                pool_by_path[p] = (p, *prepare(p, max_seconds))
+            picks.append(pool_by_path[p])
+    if not picks:
+        sys.exit(f"no 'wav:' lines in {details}")
+    return picks
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="*", help=".wav files and/or folders (omit to be asked)")
     ap.add_argument("-o", "--out", help="output folder (default: 'SoundFonts' inside the wav folder)")
     ap.add_argument("-n", "--count", type=int, help="how many fonts to make")
+    ap.add_argument("--name", help="font name (several fonts get ' 1', ' 2'...); default Random####")
     ap.add_argument("--mode", choices=MODES, help="keyboard layout (default: random per font)")
     ap.add_argument("--min-samples", type=int, help="fewest wavs per font")
     ap.add_argument("--max-samples", type=int, help="most wavs per font")
     ap.add_argument("--max-seconds", type=float, default=20, help="trim each wav to this length")
+    ap.add_argument("--no-preview", action="store_true", help="skip the *_preview.wav audition files")
+    ap.add_argument("--reroll", type=Path, metavar="DETAILS.txt",
+                    help="keep the wavs listed in a font's .txt but re-randomize everything else")
     ap.add_argument("--seed", type=int, help="seed for reproducible output")
     args = ap.parse_args()
-    interactive = not args.inputs
+    rng = random.Random(args.seed)
+    preview = not args.no_preview
 
+    if args.reroll:
+        picks = reroll_picks(args.reroll, {}, args.max_seconds)
+        out = Path(args.out) if args.out else args.reroll.parent
+        out.mkdir(parents=True, exist_ok=True)
+        base = args.name or args.reroll.stem
+        for i in range(args.count or 1):
+            title = f"{base} r{rng.randrange(10**3):03d}"
+            save_font(random_font(rng, None, title, args.mode, 0, 0, picks), out, preview)
+        return
+
+    interactive = not args.inputs
     if interactive:
         print("Random SoundFont maker\n")
         while True:
@@ -296,11 +405,9 @@ def main():
                 break
             print("  no wav files found there, try again")
         args.inputs = [str(folder)]
-    rng = random.Random(args.seed)
-    files = find_wavs(map(Path, args.inputs))
 
     pool = []
-    for f in files:
+    for f in find_wavs(map(Path, args.inputs)):
         try:
             pool.append((f, *prepare(f, args.max_seconds)))
         except Exception as e:  # keep going past unreadable files
@@ -313,8 +420,10 @@ def main():
         lo_n, hi_n = ask_range("How many wavs per font? (a number like 5, or a range like 3-8)",
                                f"3-{min(12, len(pool))}", len(pool))
         args.count = ask_range("How many fonts to make?", 1, 999)[0]
+        args.name = ask("Name for the fonts (Enter = Random1234 style)", "") or None
         mode = ask("Layout: split / layer / drum / random", "random").lower()
         args.mode = mode if mode in MODES else None
+        preview = ask("Make a short preview .wav of each font? (y/n)", "y").lower().startswith("y")
     else:
         lo_n = args.min_samples or 3
         hi_n = args.max_samples or max(lo_n, 12)
@@ -324,13 +433,31 @@ def main():
     first = Path(args.inputs[0])
     out = Path(args.out) if args.out else (first if first.is_dir() else first.parent) / "SoundFonts"
     out.mkdir(parents=True, exist_ok=True)
-    for _ in range(args.count):
-        title = f"Random{rng.randrange(10**4):04d}"
-        blob, mode, character, names = random_font(rng, pool, title, args.mode, lo_n, hi_n)
-        path = out / f"{title}.sf2"
-        path.write_bytes(blob)
-        print(f"{path.name}  {mode}/{character}  {len(names)} samples: {', '.join(names)}")
+    by_path = {p[0]: p for p in pool}
+    fonts = {}
+    for i in range(args.count):
+        if args.name:
+            title = args.name if args.count == 1 else f"{args.name} {i + 1}"
+        else:
+            title = f"Random{rng.randrange(10**4):04d}"
+        font = random_font(rng, pool, title, args.mode, lo_n, hi_n)
+        fonts[safe_name(title)] = font
+        save_font(font, out, preview)
     print(f"\nDone. Fonts are in: {out}")
+
+    while interactive:  # keep the wavs of a font you almost like, re-randomize the rest
+        pick = ask("\nRe-roll a font? Type its name to get a variation, or press Enter to finish", "")
+        if not pick:
+            break
+        pick = pick.removesuffix(".sf2")
+        if pick not in fonts:
+            print("  names:", ", ".join(fonts))
+            continue
+        old = fonts[pick]
+        title = f"{old['title'].split(' r')[0]} r{rng.randrange(10**3):03d}"
+        font = random_font(rng, None, title, args.mode, 0, 0, old["picks"])
+        fonts[safe_name(title)] = font
+        save_font(font, out, preview)
 
 
 if __name__ == "__main__":
